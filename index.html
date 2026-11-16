@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="議事録">
+<meta name="theme-color" content="#ffffff">
+<title>議事録</title>
+<style>
+  :root { --fg:#37352f; --sub:#787774; --line:#e9e9e7; --bg:#fff; --soft:#f7f6f3; --red:#e03e3e; --blue:#2383e2; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans",sans-serif; color:var(--fg); background:var(--bg); font-size:16px; }
+  header { position:sticky; top:0; background:rgba(255,255,255,.95); backdrop-filter:blur(8px); border-bottom:1px solid var(--line);
+    padding:calc(env(safe-area-inset-top) + 10px) 16px 10px; display:flex; align-items:center; gap:8px; z-index:5; }
+  header h1 { font-size:18px; margin:0; flex:1; }
+  button { font:inherit; color:inherit; background:none; border:1px solid var(--line); border-radius:8px; padding:8px 12px; }
+  button.primary { background:var(--fg); color:#fff; border-color:var(--fg); }
+  button:disabled { opacity:.4; }
+  .icon { border:none; font-size:20px; padding:6px 8px; }
+  main { padding:16px; padding-bottom:calc(env(safe-area-inset-bottom) + 40px); max-width:720px; margin:0 auto; }
+  .rec { text-align:center; padding:24px 0 28px; border-bottom:1px solid var(--line); }
+  .recbtn { width:96px; height:96px; border-radius:50%; border:4px solid var(--line); background:#fff; display:inline-flex; align-items:center; justify-content:center; padding:0; }
+  .recbtn span { width:56px; height:56px; border-radius:50%; background:var(--red); transition:.2s; }
+  .recbtn.on span { width:36px; height:36px; border-radius:8px; }
+  .timer { font-size:32px; font-variant-numeric:tabular-nums; margin:12px 0 4px; }
+  .hint { color:var(--sub); font-size:13px; line-height:1.6; }
+  .row { display:flex; gap:8px; justify-content:center; margin-top:12px; flex-wrap:wrap; }
+  .list { margin-top:8px; }
+  .item { padding:14px 4px; border-bottom:1px solid var(--line); display:flex; gap:10px; align-items:center; }
+  .item .t { flex:1; min-width:0; }
+  .item .t b { display:block; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .item .t small { color:var(--sub); }
+  .tag { font-size:12px; padding:2px 8px; border-radius:4px; background:var(--soft); color:var(--sub); white-space:nowrap; }
+  .tag.ok { background:#dbeddb; color:#2b593f; }
+  .tag.ng { background:#ffe2dd; color:#5d1715; }
+  label { display:block; font-size:13px; color:var(--sub); margin:14px 0 4px; }
+  input, select, textarea { width:100%; font:inherit; color:inherit; border:1px solid var(--line); border-radius:8px; padding:10px; background:#fff; }
+  textarea { min-height:90px; line-height:1.6; resize:vertical; }
+  h2 { font-size:16px; margin:24px 0 6px; }
+  .card { background:var(--soft); border-radius:10px; padding:12px; margin-top:10px; }
+  .progress { height:6px; background:var(--line); border-radius:3px; overflow:hidden; margin-top:8px; }
+  .progress div { height:100%; background:var(--blue); width:0; transition:.3s; }
+  audio { width:100%; margin-top:6px; }
+  .seg { font-size:13px; color:var(--sub); margin-top:8px; }
+  .hidden { display:none !important; }
+  dialog { border:none; border-radius:14px; padding:0; width:min(92vw,520px); max-height:85vh; }
+  dialog::backdrop { background:rgba(0,0,0,.3); }
+  .dlg { padding:16px 18px 20px; overflow:auto; max-height:85vh; }
+  .toast { position:fixed; left:50%; bottom:calc(env(safe-area-inset-bottom) + 24px); transform:translateX(-50%); background:var(--fg); color:#fff;
+    padding:10px 16px; border-radius:10px; font-size:14px; opacity:0; transition:.3s; pointer-events:none; max-width:90vw; z-index:20; }
+  .toast.show { opacity:1; }
+  a { color:var(--blue); }
+</style>
+</head>
+<body>
+
+<!-- ホーム -->
+<section id="home">
+  <header><h1>議事録</h1><button class="icon" id="openSettings" aria-label="設定">⚙︎</button></header>
+  <main>
+    <div class="rec">
+      <button class="recbtn" id="recBtn" aria-label="録音"><span></span></button>
+      <div class="timer" id="timer">00:00</div>
+      <div class="hint" id="recHint">タップで録音開始。録音中は画面を開いたままにしてください。</div>
+      <div class="row">
+        <label style="margin:0"><button id="importBtn">音声ファイルを読み込む</button></label>
+        <input type="file" id="importFile" accept="audio/*" class="hidden">
+      </div>
+    </div>
+    <div class="list" id="list"></div>
+  </main>
+</section>
+
+<!-- 詳細 -->
+<section id="detail" class="hidden">
+  <header><button class="icon" id="back" aria-label="戻る">‹</button><h1 id="dTitle">議事録</h1><button class="icon" id="delBtn" aria-label="削除">🗑</button></header>
+  <main>
+    <div class="card">
+      <div id="dMeta" class="hint"></div>
+      <label>補足メモ（会議名・参加者など。要約の精度が上がります）</label>
+      <input id="dMemo" placeholder="例：〇〇病院 勉強会打ち合わせ／山田先生・佐藤さん">
+      <div class="row">
+        <button class="primary" id="runBtn">文字起こしして議事録を作る</button>
+      </div>
+      <div class="progress hidden" id="prog"><div></div></div>
+      <div class="hint" id="progText" style="margin-top:6px"></div>
+    </div>
+
+    <div id="resultArea" class="hidden">
+      <label>タイトル</label><input id="rTitle">
+      <label>日付</label><input id="rDate" type="date">
+      <label>ジャンル</label><input id="rGenre">
+      <label>要約</label><textarea id="rSummary"></textarea>
+      <label>参加者（読点区切り）</label><input id="rPeople">
+      <label>議題と要点（「## 議題」の下に「- 要点」）</label><textarea id="rTopics" style="min-height:160px"></textarea>
+      <label>決定事項（1行に1つ）</label><textarea id="rDecisions"></textarea>
+      <label>ToDo（1行に1つ。「やること / 担当 / 期限」）</label><textarea id="rTodos"></textarea>
+      <div class="row">
+        <button id="resumBtn">要約だけ作り直す</button>
+        <button class="primary" id="saveBtn">Notionに保存</button>
+      </div>
+      <div class="hint" id="notionLink" style="text-align:center;margin-top:10px"></div>
+    </div>
+
+    <h2>文字起こし</h2>
+    <textarea id="dTranscript" style="min-height:200px" placeholder="まだ文字起こししていません"></textarea>
+
+    <h2>音声（この端末に保存）</h2>
+    <div id="dAudio"></div>
+  </main>
+</section>
+
+<!-- 設定 -->
+<dialog id="settings"><div class="dlg">
+  <h2 style="margin-top:0">設定</h2>
+  <label>Supabase 関数URL</label><input id="sUrl" placeholder="https://xxxx.supabase.co/functions/v1/minutes">
+  <label>パスコード</label><input id="sPass" type="password">
+  <label>文字起こしに使うAI</label>
+  <select id="sTEngine"><option value="openai">OpenAI</option><option value="gemini">Gemini</option></select>
+  <label>文字起こしのモデル名</label><input id="sTModel">
+  <label>議事録づくりに使うAI</label>
+  <select id="sSEngine"><option value="claude">Claude</option><option value="gemini">Gemini</option></select>
+  <label>議事録づくりのモデル名</label><input id="sSModel">
+  <label>よく出る言葉（読点区切り。聞き間違いが減ります）</label>
+  <textarea id="sHint" placeholder="例：抑肝散、補中益気湯、牛車腎気丸"></textarea>
+  <label>録音の区切り（分）</label><input id="sSeg" type="number" min="1" max="20">
+  <div class="hint" style="margin-top:12px">仕事の会議ではOpenAI＋Claudeがおすすめです。Geminiの無料枠は送った内容がGoogleの改善に使われることがあります。</div>
+  <div class="row" style="justify-content:flex-end"><button id="sClose">閉じる</button><button class="primary" id="sSave">保存</button></div>
+</div></dialog>
+
+<div class="toast" id="toast"></div>
+
+<script>
+// ===== 設定 =====
+const DEF = { url:"", pass:"", tEngine:"openai", tModelOpenai:"gpt-4o-transcribe", tModelGemini:"gemini-3.5-flash",
+  sEngine:"claude", sModelClaude:"claude-sonnet-5-5", sModelGemini:"gemini-3.5-flash", hint:"", seg:5 };
+let S = { ...DEF, ...JSON.parse(localStorage.getItem("minutes-settings") || "{}") };
+const $ = id => document.getElementById(id);
+const toast = (m, ms=2500) => { const t=$("toast"); t.textContent=m; t.classList.add("show"); clearTimeout(t._h); t._h=setTimeout(()=>t.classList.remove("show"), ms); };
+
+function openSettings() {
+  $("sUrl").value=S.url; $("sPass").value=S.pass; $("sTEngine").value=S.tEngine; $("sSEngine").value=S.sEngine;
+  $("sTModel").value = S.tEngine==="gemini"?S.tModelGemini:S.tModelOpenai;
+  $("sSModel").value = S.sEngine==="gemini"?S.sModelGemini:S.sModelClaude;
+  $("sHint").value=S.hint; $("sSeg").value=S.seg; $("settings").showModal();
+}
+$("sTEngine").onchange = e => $("sTModel").value = e.target.value==="gemini"?S.tModelGemini:S.tModelOpenai;
+$("sSEngine").onchange = e => $("sSModel").value = e.target.value==="gemini"?S.sModelGemini:S.sModelClaude;
+$("openSettings").onclick = openSettings;
+$("sClose").onclick = () => $("settings").close();
+$("sSave").onclick = () => {
+  S.url=$("sUrl").value.trim(); S.pass=$("sPass").value; S.tEngine=$("sTEngine").value; S.sEngine=$("sSEngine").value;
+  S[S.tEngine==="gemini"?"tModelGemini":"tModelOpenai"]=$("sTModel").value.trim();
+  S[S.sEngine==="gemini"?"sModelGemini":"sModelClaude"]=$("sSModel").value.trim();
+  S.hint=$("sHint").value.trim(); S.seg=Math.min(20,Math.max(1,+$("sSeg").value||5));
+  localStorage.setItem("minutes-settings", JSON.stringify(S)); $("settings").close(); toast("保存しました");
+};
+
+// ===== IndexedDB =====
+let db;
+const dbReady = new Promise((res, rej) => {
+  const r = indexedDB.open("minutes-db", 1);
+  r.onupgradeneeded = () => {
+    const d = r.result;
+    d.createObjectStore("meetings", { keyPath:"id" });
+    d.createObjectStore("segments", { keyPath:"id", autoIncrement:true }).createIndex("meeting","meetingId");
+  };
+  r.onsuccess = () => { db=r.result; res(); }; r.onerror = () => rej(r.error);
+});
+const tx = (store, mode="readonly") => db.transaction(store, mode).objectStore(store);
+const req = r => new Promise((res, rej) => { r.onsuccess=()=>res(r.result); r.onerror=()=>rej(r.error); });
+const putMeeting = m => req(tx("meetings","readwrite").put(m));
+const getMeeting = id => req(tx("meetings").get(id));
+const allMeetings = () => req(tx("meetings").getAll());
+const addSegment = s => req(tx("segments","readwrite").add(s));
+const putSegment = s => req(tx("segments","readwrite").put(s));
+const getSegments = async id => (await req(tx("segments").index("meeting").getAll(id))).sort((a,b)=>a.idx-b.idx);
+async function deleteMeeting(id) {
+  for (const s of await getSegments(id)) await req(tx("segments","readwrite").delete(s.id));
+  await req(tx("meetings","readwrite").delete(id));
+}
+
+// ===== 録音 =====
+let stream, recorder, meeting, segIdx=0, startAt=0, tick, segTimer, wakeLock, chunks=[];
+const mime = ["audio/mp4","audio/webm;codecs=opus","audio/webm"].find(t => window.MediaRecorder && MediaRecorder.isTypeSupported(t)) || "";
+const fmt = sec => { sec=Math.floor(sec); const h=Math.floor(sec/3600), m=Math.floor(sec%3600/60), s=sec%60;
+  return (h?h+":":"")+String(m).padStart(2,"0")+":"+String(s).padStart(2,"0"); };
+
+function startSegment() {
+  // 区切りごとに独立した入れ物を使う（切り替え時に前の録音と混ざらないように）
+  const parts = [];
+  const thisIdx = segIdx++;
+  const mid = meeting.id;
+  const rec = new MediaRecorder(stream, mime ? { mimeType:mime, audioBitsPerSecond:64000 } : {});
+  rec.ondataavailable = e => e.data.size && parts.push(e.data);
+  rec.onstop = async () => {
+    const blob = new Blob(parts, { type: rec.mimeType || mime || "audio/mp4" });
+    if (blob.size) await addSegment({ meetingId:mid, idx:thisIdx, blob, mime:blob.type, text:null });
+  };
+  rec.start(1000);
+  recorder = rec;
+}
+
+async function startRec() {
+  try { stream = await navigator.mediaDevices.getUserMedia({ audio:{ echoCancellation:true, noiseSuppression:true } }); }
+  catch { return toast("マイクを使う許可が必要です"); }
+  const now = new Date();
+  meeting = { id:"m"+now.getTime(), title:"", createdAt:now.toISOString(), duration:0, status:"録音中", source:"rec" };
+  await putMeeting(meeting);
+  segIdx=0; startAt=Date.now(); startSegment();
+  segTimer = setInterval(() => { recorder.stop(); startSegment(); }, S.seg*60*1000);
+  tick = setInterval(() => $("timer").textContent = fmt((Date.now()-startAt)/1000), 500);
+  try { wakeLock = await navigator.wakeLock?.request("screen"); } catch {}
+  $("recBtn").classList.add("on");
+  $("recHint").textContent = "録音中…画面を閉じたり他のアプリに切り替えると止まることがあります";
+}
+
+async function stopRec() {
+  clearInterval(segTimer); clearInterval(tick);
+  await new Promise(r => { const prev=recorder.onstop; recorder.onstop=async()=>{ await prev(); r(); }; recorder.stop(); });
+  stream.getTracks().forEach(t=>t.stop());
+  try { await wakeLock?.release(); } catch {}
+  meeting.duration = (Date.now()-startAt)/1000; meeting.status="未処理";
+  await putMeeting(meeting);
+  $("recBtn").classList.remove("on"); $("timer").textContent="00:00";
+  $("recHint").textContent="タップで録音開始。録音中は画面を開いたままにしてください。";
+  const id = meeting.id; meeting=null; renderList(); openDetail(id);
+}
+$("recBtn").onclick = () => recorder?.state==="recording" ? stopRec() : startRec();
+document.addEventListener("visibilitychange", async () => {
+  if (document.visibilityState==="visible" && recorder?.state==="recording") {
+    try { wakeLock = await navigator.wakeLock?.request("screen"); } catch {}
+  }
+});
+
+// ===== 音声ファイル読み込み =====
+$("importBtn").onclick = () => $("importFile").click();
+$("importFile").onchange = async e => {
+  const f = e.target.files[0]; e.target.value=""; if (!f) return;
+  if (f.size > 24*1024*1024) return toast("24MBまでのファイルに対応しています", 3500);
+  const now = new Date();
+  const m = { id:"m"+now.getTime(), title:f.name.replace(/\.[^.]+$/,""), createdAt:now.toISOString(), duration:0, status:"未処理", source:"import" };
+  await putMeeting(m);
+  await addSegment({ meetingId:m.id, idx:0, blob:f, mime:f.type, text:null, name:f.name });
+  renderList(); openDetail(m.id);
+};
+
+// ===== 一覧 =====
+async function renderList() {
+  const ms = (await allMeetings()).filter(m=>m.status!=="録音中" || m.id===meeting?.id).sort((a,b)=>b.createdAt.localeCompare(a.createdAt));
+  $("list").innerHTML = ms.length ? "" : '<p class="hint" style="text-align:center;margin-top:24px">まだ記録がありません</p>';
+  for (const m of ms) {
+    const d = new Date(m.createdAt);
+    const el = document.createElement("div"); el.className="item";
+    const cls = m.status==="保存済み"?"ok":m.status==="エラー"?"ng":"";
+    el.innerHTML = `<div class="t"><b></b><small>${d.toLocaleDateString("ja-JP")} ${d.toLocaleTimeString("ja-JP",{hour:"2-digit",minute:"2-digit"})}${m.duration?"・"+fmt(m.duration):""}</small></div><span class="tag ${cls}">${m.status}</span>`;
+    el.querySelector("b").textContent = m.result?.title || m.title || "無題の録音";
+    el.onclick = () => openDetail(m.id);
+    $("list").appendChild(el);
+  }
+}
+
+// ===== 詳細 =====
+let cur;
+const show = id => { for (const s of ["home","detail"]) $(s).classList.toggle("hidden", s!==id); scrollTo(0,0); };
+$("back").onclick = () => { show("home"); renderList(); };
+
+async function openDetail(id) {
+  cur = await getMeeting(id); const segs = await getSegments(id);
+  const d = new Date(cur.createdAt);
+  $("dTitle").textContent = cur.result?.title || cur.title || "無題の録音";
+  $("dMeta").textContent = `${d.toLocaleString("ja-JP")}　${cur.duration?fmt(cur.duration)+"　":""}${segs.length}ファイル　状態：${cur.status}`;
+  $("dMemo").value = cur.memo || "";
+  $("dTranscript").value = cur.transcript || segs.filter(s=>s.text).map(s=>s.text).join("\n");
+  $("prog").classList.add("hidden"); $("progText").textContent="";
+  $("runBtn").textContent = cur.result ? "最初から作り直す" : "文字起こしして議事録を作る";
+  $("dAudio").innerHTML = "";
+  segs.forEach((s,i) => {
+    const w = document.createElement("div"); w.className="seg";
+    const url = URL.createObjectURL(s.blob);
+    const ext = (s.mime||"").includes("webm")?"webm":"m4a";
+    w.innerHTML = `<div style="display:flex;justify-content:space-between"><span>${i+1}／${segs.length}（${(s.blob.size/1024/1024).toFixed(1)}MB）${s.text?"・文字起こし済み":""}</span><a download="${cur.id}_${i+1}.${ext}" href="${url}">保存</a></div><audio controls preload="none" src="${url}"></audio>`;
+    $("dAudio").appendChild(w);
+  });
+  fillResult(cur.result);
+  $("notionLink").innerHTML = cur.notionUrl ? `<a href="${cur.notionUrl}" target="_blank">Notionで開く</a>` : "";
+  show("detail");
+}
+
+function fillResult(r) {
+  $("resultArea").classList.toggle("hidden", !r); if (!r) return;
+  $("rTitle").value = r.title||""; $("rGenre").value = r.genre||""; $("rSummary").value = r.summary||"";
+  $("rDate").value = cur.date || cur.createdAt.slice(0,10);
+  $("rPeople").value = (r.participants||[]).join("、");
+  $("rTopics").value = (r.topics||[]).map(t=>`## ${t.heading}\n`+(t.points||[]).map(p=>`- ${p}`).join("\n")).join("\n\n");
+  $("rDecisions").value = (r.decisions||[]).join("\n");
+  $("rTodos").value = (r.todos||[]).map(t=>[t.task,t.owner,t.due].filter(Boolean).join(" / ")).join("\n");
+}
+
+function readResult() {
+  const topics=[]; let t=null;
+  for (const line of $("rTopics").value.split("\n")) {
+    const l=line.trim(); if(!l) continue;
+    if (l.startsWith("#")) { t={heading:l.replace(/^#+\s*/,""),points:[]}; topics.push(t); }
+    else { if(!t){t={heading:"要点",points:[]};topics.push(t);} t.points.push(l.replace(/^[-・*]\s*/,"")); }
+  }
+  const lines = id => $(id).value.split("\n").map(s=>s.trim()).filter(Boolean);
+  return { title:$("rTitle").value.trim(), genre:$("rGenre").value.trim(), summary:$("rSummary").value.trim(),
+    participants:$("rPeople").value.split(/[、,]/).map(s=>s.trim()).filter(Boolean), topics,
+    decisions:lines("rDecisions"),
+    todos:lines("rTodos").map(l=>{ const [task,owner="",due=""]=l.split("/").map(s=>s.trim()); return {task,owner,due}; }) };
+}
+
+async function api(body, isForm=false) {
+  if (!S.url || !S.pass) { openSettings(); throw new Error("先に設定で関数URLとパスコードを入れてください"); }
+  const r = await fetch(S.url, { method:"POST", headers: isForm ? {"x-app-passcode":S.pass} : {"x-app-passcode":S.pass,"Content-Type":"application/json"},
+    body: isForm ? body : JSON.stringify(body) });
+  const d = await r.json().catch(()=>({error:"応答を読めませんでした（"+r.status+"）"}));
+  if (!r.ok || d.error) throw new Error(d.error || r.status);
+  return d;
+}
+
+const setProg = (p, text) => { $("prog").classList.remove("hidden"); $("prog").firstElementChild.style.width=(p*100)+"%"; $("progText").textContent=text; };
+const busy = b => ["runBtn","resumBtn","saveBtn","back"].forEach(id=>$(id).disabled=b);
+
+async function transcribeAll(force) {
+  const segs = await getSegments(cur.id);
+  if (force) for (const s of segs) { s.text=null; await putSegment(s); }
+  let done = segs.filter(s=>s.text!==null).length;
+  for (const s of segs) {
+    if (s.text !== null) continue;
+    setProg(done/(segs.length+1), `文字起こし中… ${done+1}／${segs.length}`);
+    const fd = new FormData();
+    const ext = (s.mime||"").includes("webm")?"webm":(s.name?.split(".").pop()||"m4a");
+    fd.append("action","transcribe"); fd.append("engine",S.tEngine); fd.append("hint",S.hint);
+    // 読み込んだファイルは長さが分からないので、OpenAIでは長い音声も扱えるwhisper-1を使う
+    let model = S.tEngine==="gemini" ? S.tModelGemini : S.tModelOpenai;
+    if (cur.source==="import" && S.tEngine==="openai") model = "whisper-1";
+    fd.append("model", model);
+    fd.append("file", new File([s.blob], `seg${s.idx}.${ext}`, { type:s.mime || "audio/mp4" }));
+    let d, tries=0;
+    while (true) {
+      try { d = await api(fd, true); break; }
+      catch (e) { if (++tries>=2) throw e; await new Promise(r=>setTimeout(r,2000)); }
+    }
+    s.text = (d.text||"").trim(); await putSegment(s); done++;
+  }
+  cur.transcript = segs.map(s=>s.text).filter(Boolean).join("\n");
+  $("dTranscript").value = cur.transcript;
+  await putMeeting(cur);
+}
+
+async function summarizeNow() {
+  setProg(.92, "議事録を作成中…");
+  cur.transcript = $("dTranscript").value.trim(); cur.memo = $("dMemo").value.trim();
+  const d = await api({ action:"summarize", transcript:cur.transcript, memo:cur.memo, engine:S.sEngine,
+    model: S.sEngine==="gemini"?S.sModelGemini:S.sModelClaude });
+  cur.result = d.result; cur.status="作成済み"; await putMeeting(cur);
+  setProg(1, "できました。内容を確認してNotionに保存してください");
+  $("dTitle").textContent = cur.result.title || "議事録"; fillResult(cur.result);
+}
+
+$("runBtn").onclick = async () => {
+  if (cur.result && !confirm("文字起こしからやり直しますか？")) return;
+  busy(true);
+  try { await transcribeAll(!!cur.result); await summarizeNow(); }
+  catch (e) { cur.status="エラー"; await putMeeting(cur); $("progText").textContent="エラー："+e.message+"（もう一度押すと続きから再開します）"; }
+  busy(false);
+};
+$("resumBtn").onclick = async () => { busy(true); try { await summarizeNow(); } catch(e){ $("progText").textContent="エラー："+e.message; } busy(false); };
+
+$("saveBtn").onclick = async () => {
+  busy(true); $("saveBtn").textContent="保存中…";
+  try {
+    cur.result = readResult(); cur.date = $("rDate").value; cur.transcript = $("dTranscript").value.trim();
+    const d = await api({ action:"save", result:cur.result, transcript:cur.transcript, date:cur.date, duration:cur.duration?fmt(cur.duration):"" });
+    cur.notionUrl = d.url; cur.status="保存済み"; await putMeeting(cur);
+    $("notionLink").innerHTML = `<a href="${d.url}" target="_blank">Notionで開く</a>`; toast("Notionに保存しました");
+  } catch (e) { toast("保存できませんでした："+e.message, 4000); }
+  $("saveBtn").textContent="Notionに保存"; busy(false);
+};
+
+$("delBtn").onclick = async () => {
+  if (!confirm("この記録と音声を端末から削除しますか？（Notionのページは残ります）")) return;
+  await deleteMeeting(cur.id); show("home"); renderList();
+};
+$("dTranscript").onchange = async () => { cur.transcript=$("dTranscript").value; await putMeeting(cur); };
+$("dMemo").onchange = async () => { cur.memo=$("dMemo").value; await putMeeting(cur); };
+
+// 起動
+dbReady.then(async () => {
+  // 録音中に閉じてしまった記録は「未処理」に戻す
+  for (const m of await allMeetings()) if (m.status==="録音中") { m.status="未処理"; await putMeeting(m); }
+  renderList();
+  if (navigator.storage?.persist) navigator.storage.persist();
+  if (!S.url) setTimeout(()=>toast("右上の⚙︎から設定してください", 3500), 600);
+});
+</script>
+</body>
+</html>
