@@ -58,8 +58,21 @@
 </head>
 <body>
 
+<!-- ログイン -->
+<section id="login" class="hidden">
+  <header><h1>議事録</h1></header>
+  <main>
+    <form id="loginForm" style="max-width:420px;margin:24px auto">
+      <label>メールアドレス</label><input id="lEmail" type="email" autocomplete="username" required>
+      <label>パスワード</label><input id="lPass" type="password" autocomplete="current-password" required>
+      <div class="row"><button class="primary" type="submit" id="lBtn">ログイン</button></div>
+      <div class="hint" id="lMsg" style="text-align:center;margin-top:10px"></div>
+    </form>
+  </main>
+</section>
+
 <!-- ホーム -->
-<section id="home">
+<section id="home" class="hidden">
   <header><h1>議事録</h1><button class="icon" id="openSettings" aria-label="設定">⚙︎</button></header>
   <main>
     <div class="rec">
@@ -118,8 +131,6 @@
 <!-- 設定 -->
 <dialog id="settings"><div class="dlg">
   <h2 style="margin-top:0;outline:none" tabindex="-1" autofocus>設定</h2>
-  <label>Supabase 関数URL</label><input id="sUrl" placeholder="https://xxxx.supabase.co/functions/v1/minutes">
-  <label>パスコード</label><input id="sPass" type="password">
   <label>文字起こしに使うAI</label>
   <select id="sTEngine"><option value="openai">OpenAI</option><option value="gemini">Gemini</option></select>
   <label>文字起こしのモデル名</label><input id="sTModel">
@@ -131,22 +142,28 @@
   <label>録音の区切り（分）</label><input id="sSeg" type="number" min="1" max="20">
   <label>料金表示の為替レート（1ドル＝何円）</label><input id="sRate" type="number" min="1" step="1">
   <div class="hint" style="margin-top:12px">仕事の会議ではOpenAI＋Claudeがおすすめです。Geminiの無料枠は送った内容がGoogleの改善に使われることがあります。</div>
-  <div class="row" style="justify-content:flex-end"><button id="sClose">閉じる</button><button class="primary" id="sSave">保存</button></div>
+  <div class="row" style="justify-content:space-between"><button id="sLogout">ログアウト</button><span><button id="sClose">閉じる</button> <button class="primary" id="sSave">保存</button></span></div>
 </div></dialog>
 
 <div class="toast" id="toast"></div>
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
+// ===== ログイン（ほかのアプリと同じSupabaseのアカウント） =====
+const SB_URL = "https://oqtyorwlrnrcyjxiassg.supabase.co";
+const sb = supabase.createClient(SB_URL, "sb_publishable_5KRsDfHG07lsUL7uUr6zpQ_2ehucxbJ");
+async function token() { const { data } = await sb.auth.getSession(); return data.session?.access_token; }
+
 // ===== 設定 =====
-const DEF = { url:"https://oqtyorwlrnrcyjxiassg.supabase.co/functions/v1/minutes", pass:"", tEngine:"openai", tModelOpenai:"gpt-4o-transcribe", tModelGemini:"gemini-3.5-flash",
+const DEF = { url:SB_URL+"/functions/v1/minutes", tEngine:"openai", tModelOpenai:"gpt-4o-transcribe", tModelGemini:"gemini-3.5-flash",
   sEngine:"claude", sModelClaude:"claude-sonnet-5-5", sModelGemini:"gemini-3.5-flash", hint:"", seg:5, rate:155 };
 let S = { ...DEF, ...JSON.parse(localStorage.getItem("minutes-settings") || "{}") };
-if (!S.url) S.url = DEF.url;
+S.url = DEF.url;
 const $ = id => document.getElementById(id);
 const toast = (m, ms=2500) => { const t=$("toast"); t.textContent=m; t.classList.add("show"); clearTimeout(t._h); t._h=setTimeout(()=>t.classList.remove("show"), ms); };
 
 function openSettings() {
-  $("sUrl").value=S.url; $("sPass").value=S.pass; $("sTEngine").value=S.tEngine; $("sSEngine").value=S.sEngine;
+  $("sTEngine").value=S.tEngine; $("sSEngine").value=S.sEngine;
   $("sTModel").value = S.tEngine==="gemini"?S.tModelGemini:S.tModelOpenai;
   $("sSModel").value = S.sEngine==="gemini"?S.sModelGemini:S.sModelClaude;
   $("sHint").value=S.hint; $("sSeg").value=S.seg; $("sRate").value=S.rate; $("settings").showModal();
@@ -158,7 +175,7 @@ $("sSEngine").onchange = e => $("sSModel").value = e.target.value==="gemini"?S.s
 $("openSettings").onclick = openSettings;
 $("sClose").onclick = () => $("settings").close();
 $("sSave").onclick = () => {
-  S.url=$("sUrl").value.trim(); S.pass=$("sPass").value; S.tEngine=$("sTEngine").value; S.sEngine=$("sSEngine").value;
+  S.tEngine=$("sTEngine").value; S.sEngine=$("sSEngine").value;
   S[S.tEngine==="gemini"?"tModelGemini":"tModelOpenai"]=$("sTModel").value.trim();
   S[S.sEngine==="gemini"?"sModelGemini":"sModelClaude"]=$("sSModel").value.trim();
   S.hint=$("sHint").value.trim(); S.seg=Math.min(20,Math.max(1,+$("sSeg").value||5)); S.rate=+$("sRate").value||155;
@@ -284,7 +301,7 @@ async function renderList() {
 
 // ===== 詳細 =====
 let cur;
-const show = id => { for (const s of ["home","detail"]) $(s).classList.toggle("hidden", s!==id); scrollTo(0,0); };
+const show = id => { for (const s of ["login","home","detail"]) $(s).classList.toggle("hidden", s!==id); scrollTo(0,0); };
 $("back").onclick = () => { show("home"); renderList(); };
 
 async function openDetail(id) {
@@ -341,8 +358,10 @@ function readResult() {
 }
 
 async function api(body, isForm=false) {
-  if (!S.url || !S.pass) { openSettings(); throw new Error("先に設定で関数URLとパスコードを入れてください"); }
-  const r = await fetch(S.url, { method:"POST", headers: isForm ? {"x-app-passcode":S.pass} : {"x-app-passcode":S.pass,"Content-Type":"application/json"},
+  const t = await token();
+  if (!t) { show("login"); throw new Error("ログインしてください"); }
+  const auth = { Authorization:"Bearer "+t };
+  const r = await fetch(S.url, { method:"POST", headers: isForm ? auth : {...auth,"Content-Type":"application/json"},
     body: isForm ? body : JSON.stringify(body) });
   const d = await r.json().catch(()=>({error:"応答を読めませんでした（"+r.status+"）"}));
   if (!r.ok || d.error) throw new Error(d.error || r.status);
@@ -425,13 +444,23 @@ $("delBtn").onclick = async () => {
 $("dTranscript").onchange = async () => { cur.transcript=$("dTranscript").value; await putMeeting(cur); };
 $("dMemo").onchange = async () => { cur.memo=$("dMemo").value; await putMeeting(cur); };
 
+// ログイン・ログアウト
+$("loginForm").onsubmit = async e => {
+  e.preventDefault(); $("lBtn").disabled = true; $("lMsg").textContent = "";
+  const { error } = await sb.auth.signInWithPassword({ email:$("lEmail").value.trim(), password:$("lPass").value });
+  $("lBtn").disabled = false;
+  if (error) { $("lMsg").textContent = "ログインできませんでした：" + error.message; return; }
+  $("lPass").value = ""; show("home"); renderList();
+};
+$("sLogout").onclick = async () => { await sb.auth.signOut(); $("settings").close(); show("login"); };
+
 // 起動
 dbReady.then(async () => {
   // 録音中に閉じてしまった記録は「未処理」に戻す
   for (const m of await allMeetings()) if (m.status==="録音中") { m.status="未処理"; await putMeeting(m); }
   renderList();
   if (navigator.storage?.persist) navigator.storage.persist();
-  if (!S.pass) setTimeout(()=>toast("右上の⚙︎からパスコードを入れてください", 3500), 600);
+  show((await token()) ? "home" : "login");
 });
 </script>
 </body>

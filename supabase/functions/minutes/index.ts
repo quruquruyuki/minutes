@@ -1,6 +1,6 @@
 // 議事録アプリ用 Supabase Edge Function
 // action: transcribe（文字起こし） / summarize（議事録化） / save（Notion保存）
-// 使うシークレット: APP_PASSCODE, openai_api_key, ANTHROPIC_API_KEY, NOTION_API_KEY, GEMINI_API_KEY（Gemini使用時のみ）
+// 使うシークレット: ALLOWED_EMAIL（ログインを許可するメール）, openai_api_key, ANTHROPIC_API_KEY, NOTION_API_KEY, GEMINI_API_KEY（Gemini使用時のみ）
 // 議事録DBのIDは秘密情報ではないので下に直接書いている（MINUTES_DATA_SOURCE_ID で上書き可）
 import { encodeBase64 } from "jsr:@std/encoding@1/base64";
 
@@ -34,15 +34,25 @@ const usdOf = (model: string, tin: number, tout: number, ain = 0) => {
   if (!p) return null; // 料金表にないモデル
   return ((ain * (p.ain ?? p.in)) + tin * p.in + tout * p.out) / 1e6;
 };
+// ログイン中のユーザーが ALLOWED_EMAIL 本人かを確かめる
+async function isAllowedUser(req: Request) {
+  const token = (req.headers.get("authorization") ?? "").replace(/^Bearer\s+/i, "");
+  if (!token) return false;
+  const r = await fetch(`${env("SUPABASE_URL")}/auth/v1/user`, {
+    headers: { Authorization: `Bearer ${token}`, apikey: env("SUPABASE_ANON_KEY") },
+  });
+  if (!r.ok) return false;
+  const u = await r.json();
+  const allowed = env("ALLOWED_EMAIL").toLowerCase().split(",").map((x) => x.trim()).filter(Boolean);
+  return !!u.email && allowed.includes(String(u.email).toLowerCase());
+}
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { ...CORS, "Content-Type": "application/json" } });
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: CORS });
   if (req.method !== "POST") return json({ error: "POSTのみ対応" }, 405);
-  if (!env("APP_PASSCODE") || req.headers.get("x-app-passcode") !== env("APP_PASSCODE")) {
-    return json({ error: "パスコードが違います" }, 401);
-  }
+  if (!(await isAllowedUser(req))) return json({ error: "ログインし直してください" }, 401);
   try {
     const ct = req.headers.get("content-type") ?? "";
     if (ct.includes("multipart/form-data")) {

@@ -25,7 +25,7 @@ supabase/functions/minutes/index.ts     AIとNotionを呼び出す関数（Supab
 ```sh
 supabase functions deploy minutes --no-verify-jwt
 supabase secrets set \
-  APP_PASSCODE=好きな合言葉 \
+  ALLOWED_EMAIL=ログインに使うメールアドレス \
   OPENAI_API_KEY=sk-... \
   ANTHROPIC_API_KEY=sk-ant-... \
   GEMINI_API_KEY=... \
@@ -37,10 +37,9 @@ Geminiを使わない場合、GEMINI_API_KEY は無しでも動きます。
 ### 3. GitHub Pagesで公開
 リポジトリに `index.html` を置いて Pages を有効にし、iPhoneのSafariで開いて「ホーム画面に追加」。
 
-### 4. アプリの設定（右上の⚙︎）
-- 関数URL：`https://<プロジェクトID>.supabase.co/functions/v1/minutes`
-- パスコード：手順2で決めた合言葉
-- 使うAIとモデル名、よく出る言葉（薬剤名など）、区切りの長さ
+### 4. ログインと設定
+- ほかの個人アプリと同じSupabaseのメールアドレスとパスワードでログイン（ALLOWED_EMAILのアカウントだけが使える）
+- 右上の⚙︎：使うAIとモデル名、よく出る言葉（薬剤名など）、区切りの長さ、為替レート
 
 ## 使い方のメモ
 - 録音中は画面を開いたままにしてください（iPhoneは画面を閉じたり他のアプリに切り替えるとマイクが止まります）
