@@ -87,7 +87,7 @@
       <div class="hint" style="margin-top:6px">画面を消して録るときは、iPhoneの「ボイスメモ」で録音して下から読み込んでください（長さの制限なし）</div>
       <div class="row">
         <label style="margin:0"><button id="importBtn">音声ファイルを読み込む</button></label>
-        <input type="file" id="importFile" accept="audio/*" class="hidden">
+        <input type="file" id="importFile" accept="audio/*" multiple class="hidden">
       </div>
     </div>
     <div class="hint" id="monthCost" style="text-align:right;margin-top:12px"></div>
@@ -416,27 +416,43 @@ async function splitDecodeAll(file, onP) {
 }
 
 $("importBtn").onclick = () => $("importFile").click();
-$("importFile").onchange = async e => {
-  const f = e.target.files[0]; e.target.value=""; if (!f) return;
-  let parts = null, lock = null;
-  try { lock = await navigator.wakeLock?.request("screen"); } catch {}
-  const onP = p => busyShow("音声を準備しています", p, `${Math.round(p*100)}%　5分ごとに分けています`);
-  busyShow("音声を準備しています", 0, "読み込み中…");
+// 1つのファイルを読み込んで記録を作る（長い音声は5分ごとに分ける）
+async function importOne(f, k, n) {
+  const head = n > 1 ? `（${k}／${n}）` : "";
+  const onP = p => busyShow("音声を準備しています"+head, p, `${f.name}　${Math.round(p*100)}%`);
+  busyShow("音声を準備しています"+head, 0, `${f.name}　読み込み中…`);
+  let parts = null;
   try { parts = await splitMp4(f, onP); }
   catch (e1) {
     try { parts = await splitDecodeAll(f, onP); }
     catch (e2) { parts = null; }
   }
-  busyHide(); try { await lock?.release(); } catch {}
-  if (!parts && f.size > 24*1024*1024) return toast("この音声は読み込めませんでした。m4a（ボイスメモ）形式で試してください", 4500);
-
+  if (!parts && f.size > 24*1024*1024) return null;
   const now = new Date();
-  const m = { id:"m"+now.getTime(), title:f.name.replace(/\.[^.]+$/,""), createdAt:now.toISOString(), status:"未処理", mode:S.mode,
+  // 録音した日（ファイルの日時）を議事録の日付にする
+  const rec = f.lastModified ? new Date(f.lastModified) : now;
+  const recDate = `${rec.getFullYear()}-${String(rec.getMonth()+1).padStart(2,"0")}-${String(rec.getDate()).padStart(2,"0")}`;
+  const m = { id:"m"+now.getTime()+"-"+k, title:f.name.replace(/\.[^.]+$/,""), createdAt:now.toISOString(), date:recDate, status:"未処理", mode:S.mode,
     source: parts ? "import-split" : "import", duration: parts ? parts.reduce((a,p)=>a+p.seconds,0) : 0 };
   await putMeeting(m);
   if (parts) { for (let i=0;i<parts.length;i++) await addSegment({ meetingId:m.id, idx:i, blob:parts[i].blob, mime:"audio/mp3", text:null, name:`part${i+1}.mp3` }); }
   else await addSegment({ meetingId:m.id, idx:0, blob:f, mime:f.type, text:null, name:f.name });
-  renderList(); openDetail(m.id);
+  return m.id;
+}
+
+$("importFile").onchange = async e => {
+  const files = [...e.target.files]; e.target.value=""; if (!files.length) return;
+  let lock = null; try { lock = await navigator.wakeLock?.request("screen"); } catch {}
+  const ids = [], failed = [];
+  for (let i = 0; i < files.length; i++) {
+    const id = await importOne(files[i], i+1, files.length);
+    if (id) ids.push(id); else failed.push(files[i].name);
+  }
+  busyHide(); try { await lock?.release(); } catch {}
+  renderList();
+  if (failed.length) toast(`読み込めなかったファイル：${failed.join("、")}（m4a形式で試してください）`, 5000);
+  if (ids.length === 1) openDetail(ids[0]);
+  else if (ids.length > 1) toast(`${ids.length}件を読み込みました。一覧から1件ずつ処理してください`, 3500);
 };
 
 // ===== 一覧 =====
