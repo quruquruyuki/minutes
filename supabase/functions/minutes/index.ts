@@ -30,6 +30,8 @@ const PRICE: Record<string, { ain?: number; in: number; out: number }> = {
   "gemini-3.5-flash-lite": { in: 0.3, out: 2.5 },
 };
 let WHISPER_PER_MIN = 0.006;
+// 分単位で料金がかかるモデル（USD／分）。共通設定の「モデル名_per_min」で上書きする
+const PER_MIN: Record<string, number> = { "whisper-1": 0.006, "gpt-transcribe": 0.0045 };
 
 // ── 全アプリ共通の設定（Supabase の app_settings テーブル）──
 // AIモデルや料金単価はここから読む。1分間は使い回す。読めないときは従来の値（Secret・既定値）を使う
@@ -59,6 +61,7 @@ async function applyPrices() {
   if (!p || typeof p !== "object") return;
   for (const [k, v] of Object.entries(p as Record<string, any>)) {
     if (k === "whisper-1_per_min" && typeof v === "number") WHISPER_PER_MIN = v;
+    if (k.endsWith("_per_min") && typeof v === "number") PER_MIN[k.slice(0, -"_per_min".length)] = v;
     else if (v && typeof v === "object" && typeof v.in === "number") PRICE[k] = v;
   }
 }
@@ -141,9 +144,9 @@ async function transcribe(form: FormData) {
   if (!r.ok) throw new Error(`OpenAI: ${d.error?.message ?? r.status}`);
   const u = d.usage ?? {};
   let usd: number | null = null;
-  if (u.type === "duration" || om === "whisper-1") {
+  if (u.type === "duration" || PER_MIN[om] != null) {
     const sec = u.seconds ?? Number(form.get("seconds") ?? 0);
-    usd = sec ? (sec / 60) * WHISPER_PER_MIN : null;
+    usd = sec ? (sec / 60) * (PER_MIN[om] ?? WHISPER_PER_MIN) : null;
   } else if (u.input_tokens != null) {
     const ain = u.input_token_details?.audio_tokens ?? u.input_tokens;
     const tin = u.input_token_details?.text_tokens ?? 0;
@@ -209,14 +212,16 @@ const SEMINAR_PROMPT = `以下は製品や疾患に関するセミナー・講�
 }`;
 
 async function summarize(body: any) {
-  const { transcript, engine = "claude", model = "", memo = "", mode = "meeting" } = body;
+  const { transcript, engine = "claude", model = "", memo = "", mode = "meeting", quality = "standard" } = body;
   if (!transcript) throw new Error("文字起こしが空です");
   const user = `${mode === "seminar" ? SEMINAR_PROMPT : SUMMARY_PROMPT}${memo ? `\n\n補足メモ: ${memo}` : ""}\n\n--- 文字起こし ---\n${transcript}`;
   let raw = "";
   let usd: number | null = null;
   const sm = model || (engine === "gemini"
     ? await setting("minutes", "gemini_model", "gemini-3.5-flash")
-    : await setting("minutes", "summary_model", "claude-sonnet-5-5"));
+    : quality === "hq"
+      ? await setting("minutes", "summary_model_hq", "claude-opus-5-5")
+      : await setting("minutes", "summary_model", "claude-sonnet-5-5"));
 
   if (engine === "gemini") {
     const r = await fetch(
