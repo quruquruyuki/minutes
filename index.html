@@ -138,9 +138,10 @@
 
 <script>
 // ===== 設定 =====
-const DEF = { url:"", pass:"", tEngine:"openai", tModelOpenai:"gpt-4o-transcribe", tModelGemini:"gemini-3.5-flash",
+const DEF = { url:"https://oqtyorwlrnrcyjxiassg.supabase.co/functions/v1/minutes", pass:"", tEngine:"openai", tModelOpenai:"gpt-4o-transcribe", tModelGemini:"gemini-3.5-flash",
   sEngine:"claude", sModelClaude:"claude-sonnet-5-5", sModelGemini:"gemini-3.5-flash", hint:"", seg:5, rate:155 };
 let S = { ...DEF, ...JSON.parse(localStorage.getItem("minutes-settings") || "{}") };
+if (!S.url) S.url = DEF.url;
 const $ = id => document.getElementById(id);
 const toast = (m, ms=2500) => { const t=$("toast"); t.textContent=m; t.classList.add("show"); clearTimeout(t._h); t._h=setTimeout(()=>t.classList.remove("show"), ms); };
 
@@ -430,7 +431,7 @@ dbReady.then(async () => {
   for (const m of await allMeetings()) if (m.status==="録音中") { m.status="未処理"; await putMeeting(m); }
   renderList();
   if (navigator.storage?.persist) navigator.storage.persist();
-  if (!S.url) setTimeout(()=>toast("右上の⚙︎から設定してください", 3500), 600);
+  if (!S.pass) setTimeout(()=>toast("右上の⚙︎からパスコードを入れてください", 3500), 600);
 });
 </script>
 </body>
