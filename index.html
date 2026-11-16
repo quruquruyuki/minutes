@@ -84,6 +84,7 @@
       <button class="recbtn" id="recBtn" aria-label="録音"><span></span></button>
       <div class="timer" id="timer">00:00</div>
       <div class="hint" id="recHint">タップで録音開始。録音中は画面を開いたままにしてください。</div>
+      <div class="hint" style="margin-top:6px">画面を消して録るときは、iPhoneの「ボイスメモ」で録音して下から読み込んでください（長さの制限なし）</div>
       <div class="row">
         <label style="margin:0"><button id="importBtn">音声ファイルを読み込む</button></label>
         <input type="file" id="importFile" accept="audio/*" class="hidden">
@@ -166,8 +167,16 @@
 </div></dialog>
 
 <div class="toast" id="toast"></div>
+<div id="busyOverlay" class="hidden" style="position:fixed;inset:0;background:rgba(255,255,255,.92);z-index:30;display:flex;align-items:center;justify-content:center;flex-direction:column;padding:24px;text-align:center">
+  <div style="font-weight:600;margin-bottom:10px" id="busyTitle">音声を準備しています</div>
+  <div class="progress" style="width:min(80vw,360px)"><div id="busyBar"></div></div>
+  <div class="hint" id="busyText" style="margin-top:8px"></div>
+  <div class="hint" style="margin-top:14px">終わるまでこの画面のままお待ちください</div>
+</div>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdn.jsdelivr.net/npm/mp4box@0.5.2/dist/mp4box.all.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/lamejs@1.2.1/lame.min.js"></script>
 <script>
 // ===== ログイン（ほかのアプリと同じSupabaseのアカウント） =====
 const SB_URL = "https://oqtyorwlrnrcyjxiassg.supabase.co";
@@ -311,14 +320,115 @@ document.addEventListener("visibilitychange", async () => {
 });
 
 // ===== 音声ファイル読み込み =====
+// 長い音声（ボイスメモなど）は端末の中で5分ごとのMP3に分けてから文字起こしする
+const SPLIT_SEC = 300, OUT_RATE = 16000;
+const busyShow = (title, p, text) => { $("busyOverlay").classList.remove("hidden"); $("busyTitle").textContent = title; $("busyBar").style.width = Math.round(p*100)+"%"; $("busyText").textContent = text||""; };
+const busyHide = () => $("busyOverlay").classList.add("hidden");
+
+// 16kHz・モノラルの音を受け取り、5分ごとにMP3ファイルにまとめる
+function makeSegmenter() {
+  const parts = []; let enc = null, chunks = [], count = 0, buf = new Int16Array(11520), bi = 0;
+  const flushBuf = () => { if (!bi) return; const o = enc.encodeBuffer(buf.subarray(0, bi)); if (o.length) chunks.push(new Uint8Array(o)); bi = 0; };
+  const close = () => {
+    if (!enc) return; flushBuf(); const o = enc.flush(); if (o.length) chunks.push(new Uint8Array(o));
+    parts.push({ blob: new Blob(chunks, { type:"audio/mp3" }), seconds: count/OUT_RATE }); enc = null; chunks = []; count = 0;
+  };
+  return {
+    push(x) {
+      if (!enc) enc = new lamejs.Mp3Encoder(1, OUT_RATE, 32);
+      buf[bi++] = Math.max(-32768, Math.min(32767, Math.round(x*32767))); count++;
+      if (bi === buf.length) flushBuf();
+      if (count >= SPLIT_SEC*OUT_RATE) close();
+    },
+    finish() { close(); return parts; },
+  };
+}
+// 元のサンプリング周波数から16kHzへ（区間の平均で間引く）
+function makeResampler(srcRate, out) {
+  const r = srcRate / OUT_RATE; let acc = 0, cnt = 0, idx = 0, next = r;
+  return x => { acc += x; cnt++; idx++; if (idx >= next) { out(acc/cnt); acc = 0; cnt = 0; next += r; } };
+}
+const yieldUI = () => new Promise(r => setTimeout(r, 0));
+
+// m4a（ボイスメモ）などのMP4形式：少しずつ復号するので長い音声でも端末のメモリに収まる
+async function splitMp4(file, onP) {
+  if (!window.AudioDecoder || !window.MP4Box) throw new Error("unsupported");
+  const ab = await file.arrayBuffer(); ab.fileStart = 0;
+  const mp4 = MP4Box.createFile(); let info = null;
+  mp4.onReady = i => info = i; mp4.onError = () => {};
+  mp4.appendBuffer(ab); mp4.flush();
+  const tr = info?.audioTracks?.[0]; if (!tr) throw new Error("unsupported");
+  const entry = mp4.getTrackById(tr.id).mdia.minf.stbl.stsd.entries[0];
+  const description = entry.esds?.esd?.descs?.[0]?.descs?.[0]?.data;
+  const config = { codec: tr.codec, sampleRate: tr.audio.sample_rate, numberOfChannels: tr.audio.channel_count, ...(description ? { description } : {}) };
+  if (!(await AudioDecoder.isConfigSupported(config)).supported) throw new Error("unsupported");
+  const samples = []; mp4.onSamples = (id, u, list) => samples.push(...list);
+  mp4.setExtractionOptions(tr.id, null, { nbSamples: 1e7 }); mp4.start(); mp4.flush();
+  if (!samples.length) throw new Error("unsupported");
+
+  const seg = makeSegmenter(); let resample = null, rate = 0, decErr = null; const mono = [];
+  const dec = new AudioDecoder({
+    output: d => {
+      try {
+        if (d.sampleRate !== rate) { rate = d.sampleRate; resample = makeResampler(rate, x => seg.push(x)); }
+        const n = d.numberOfFrames, ch = d.numberOfChannels;
+        if (mono.length < 1 || mono[0].length < n) { mono[0] = new Float32Array(n); mono[1] = new Float32Array(n); }
+        const sum = mono[0], tmp = mono[1]; sum.fill(0, 0, n);
+        for (let c = 0; c < ch; c++) { d.copyTo(tmp, { planeIndex:c, format:"f32-planar" }); for (let i = 0; i < n; i++) sum[i] += tmp[i]; }
+        for (let i = 0; i < n; i++) resample(sum[i]/ch);
+      } catch (e) { decErr = e; } finally { d.close(); }
+    },
+    error: e => decErr = e,
+  });
+  dec.configure(config);
+  for (let i = 0; i < samples.length; i++) {
+    const sm = samples[i];
+    dec.decode(new EncodedAudioChunk({ type:"key", timestamp: Math.round(sm.cts*1e6/sm.timescale), duration: Math.round(sm.duration*1e6/sm.timescale), data: sm.data }));
+    if (dec.decodeQueueSize > 64) await new Promise(r => dec.addEventListener("dequeue", r, { once:true }));
+    if (decErr) throw decErr;
+    if (i % 2000 === 0) { onP(i/samples.length); await yieldUI(); }
+  }
+  await dec.flush(); dec.close();
+  if (decErr) throw decErr;
+  return seg.finish();
+}
+
+// それ以外の形式（mp3・wavなど）：まとめて復号する。長すぎる音声は端末によっては失敗する
+async function splitDecodeAll(file, onP) {
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  const ctx = new Ctx({ sampleRate: OUT_RATE });
+  const ab = await ctx.decodeAudioData(await file.arrayBuffer()); ctx.close?.();
+  const seg = makeSegmenter(); const resample = makeResampler(ab.sampleRate, x => seg.push(x));
+  const chs = Array.from({ length: ab.numberOfChannels }, (_, c) => ab.getChannelData(c));
+  const step = OUT_RATE*30;
+  for (let i = 0; i < ab.length; i++) {
+    let v = 0; for (const c of chs) v += c[i]; resample(v/chs.length);
+    if (i % step === 0) { onP(i/ab.length); await yieldUI(); }
+  }
+  return seg.finish();
+}
+
 $("importBtn").onclick = () => $("importFile").click();
 $("importFile").onchange = async e => {
   const f = e.target.files[0]; e.target.value=""; if (!f) return;
-  if (f.size > 24*1024*1024) return toast("24MBまでのファイルに対応しています", 3500);
+  let parts = null, lock = null;
+  try { lock = await navigator.wakeLock?.request("screen"); } catch {}
+  const onP = p => busyShow("音声を準備しています", p, `${Math.round(p*100)}%　5分ごとに分けています`);
+  busyShow("音声を準備しています", 0, "読み込み中…");
+  try { parts = await splitMp4(f, onP); }
+  catch (e1) {
+    try { parts = await splitDecodeAll(f, onP); }
+    catch (e2) { parts = null; }
+  }
+  busyHide(); try { await lock?.release(); } catch {}
+  if (!parts && f.size > 24*1024*1024) return toast("この音声は読み込めませんでした。m4a（ボイスメモ）形式で試してください", 4500);
+
   const now = new Date();
-  const m = { id:"m"+now.getTime(), title:f.name.replace(/\.[^.]+$/,""), createdAt:now.toISOString(), duration:0, status:"未処理", source:"import", mode:S.mode };
+  const m = { id:"m"+now.getTime(), title:f.name.replace(/\.[^.]+$/,""), createdAt:now.toISOString(), status:"未処理", mode:S.mode,
+    source: parts ? "import-split" : "import", duration: parts ? parts.reduce((a,p)=>a+p.seconds,0) : 0 };
   await putMeeting(m);
-  await addSegment({ meetingId:m.id, idx:0, blob:f, mime:f.type, text:null, name:f.name });
+  if (parts) { for (let i=0;i<parts.length;i++) await addSegment({ meetingId:m.id, idx:i, blob:parts[i].blob, mime:"audio/mp3", text:null, name:`part${i+1}.mp3` }); }
+  else await addSegment({ meetingId:m.id, idx:0, blob:f, mime:f.type, text:null, name:f.name });
   renderList(); openDetail(m.id);
 };
 
