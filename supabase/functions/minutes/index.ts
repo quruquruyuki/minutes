@@ -20,7 +20,7 @@ const env = (...keys: string[]) => {
 };
 const MINUTES_DS = () => env("MINUTES_DATA_SOURCE_ID") || "41a85790-2406-818c-9fb4-000b58841972";
 const SEMINAR_DS = () => env("SEMINAR_DATA_SOURCE_ID") || "41a85790-2406-8160-a503-000b3ff716d6"; // Tsumura wiki / セミナーノート
-// 料金表（USD／100万トークン）。2026年11月時点の公表価格。変わったらここを直す
+// 料金表（USD／100万トークン）。共通設定（app_settings: global/prices）があればそちらで上書きする。下は予備
 const PRICE: Record<string, { ain?: number; in: number; out: number }> = {
   "gpt-4o-transcribe": { ain: 6, in: 2.5, out: 10 },
   "gpt-4o-mini-transcribe": { ain: 3, in: 1.25, out: 5 },
@@ -29,7 +29,39 @@ const PRICE: Record<string, { ain?: number; in: number; out: number }> = {
   "gemini-3.5-flash": { in: 1.5, out: 9 },
   "gemini-3.5-flash-lite": { in: 0.3, out: 2.5 },
 };
-const WHISPER_PER_MIN = 0.006;
+let WHISPER_PER_MIN = 0.006;
+
+// ── 全アプリ共通の設定（Supabase の app_settings テーブル）──
+// AIモデルや料金単価はここから読む。1分間は使い回す。読めないときは従来の値（Secret・既定値）を使う
+const SETTINGS_TTL = 60_000;
+let settingsCache: { at: number; map: Record<string, unknown> } | null = null;
+async function appSettings(app: string): Promise<Record<string, unknown>> {
+  if (settingsCache && Date.now() - settingsCache.at < SETTINGS_TTL) return settingsCache.map;
+  const map: Record<string, unknown> = {};
+  try {
+    const key = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
+    const q = `select=app,key,value&app=in.${encodeURIComponent(`("global","${app}")`)}`;
+    const r = await fetch(`${Deno.env.get("SUPABASE_URL")}/rest/v1/app_settings?${q}`, { headers: { apikey: key, Authorization: `Bearer ${key}` } });
+    if (r.ok) for (const row of await r.json()) map[row.app === "global" ? `global.${row.key}` : row.key] = row.value;
+    else console.error("app_settings", r.status, await r.text());
+  } catch (e) { console.error("app_settings", e); }
+  settingsCache = { at: Date.now(), map };
+  return map;
+}
+async function setting(app: string, key: string, fallback: string): Promise<string> {
+  const v = (await appSettings(app))[key];
+  return typeof v === "string" && v.trim() ? v.trim() : fallback;
+}
+
+// 共通設定の料金表を取り込む
+async function applyPrices() {
+  const p = (await appSettings("minutes"))["global.prices"];
+  if (!p || typeof p !== "object") return;
+  for (const [k, v] of Object.entries(p as Record<string, any>)) {
+    if (k === "whisper-1_per_min" && typeof v === "number") WHISPER_PER_MIN = v;
+    else if (v && typeof v === "object" && typeof v.in === "number") PRICE[k] = v;
+  }
+}
 const usdOf = (model: string, tin: number, tout: number, ain = 0) => {
   const p = PRICE[model];
   if (!p) return null; // 料金表にないモデル
@@ -55,6 +87,7 @@ Deno.serve(async (req) => {
   if (req.method !== "POST") return json({ error: "POSTのみ対応" }, 405);
   if (!(await isAllowedUser(req))) return json({ error: "ログインし直してください" }, 401);
   try {
+    await applyPrices();
     const ct = req.headers.get("content-type") ?? "";
     if (ct.includes("multipart/form-data")) {
       const form = await req.formData();
@@ -84,7 +117,7 @@ async function transcribe(form: FormData) {
       "この音声を日本語で一字一句、文字起こししてください。要約や補足はせず、聞き取れた発言だけを出力してください。" +
       "話者が変わったと分かる場合は改行してください。" +
       (hint ? `\n次の言葉が出てくる可能性があります: ${hint}` : "");
-    const m = model || "gemini-3.5-flash";
+    const m = model || await setting("minutes", "gemini_model", "gemini-3.5-flash");
     const d = await geminiAudio(m, file, prompt);
     const u = d.usageMetadata ?? {};
     const usd = usdOf(m, u.promptTokenCount ?? 0, (u.candidatesTokenCount ?? 0) + (u.thoughtsTokenCount ?? 0));
@@ -94,7 +127,7 @@ async function transcribe(form: FormData) {
   // OpenAI
   const fd = new FormData();
   fd.append("file", file, file.name || "audio.m4a");
-  const om = model || "gpt-4o-transcribe";
+  const om = model || await setting("minutes", "transcribe_model", "gpt-4o-transcribe");
   fd.append("model", om);
   fd.append("language", "ja");
   fd.append("response_format", "json");
@@ -181,10 +214,13 @@ async function summarize(body: any) {
   const user = `${mode === "seminar" ? SEMINAR_PROMPT : SUMMARY_PROMPT}${memo ? `\n\n補足メモ: ${memo}` : ""}\n\n--- 文字起こし ---\n${transcript}`;
   let raw = "";
   let usd: number | null = null;
+  const sm = model || (engine === "gemini"
+    ? await setting("minutes", "gemini_model", "gemini-3.5-flash")
+    : await setting("minutes", "summary_model", "claude-sonnet-5-5"));
 
   if (engine === "gemini") {
     const r = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${model || "gemini-3.5-flash"}:generateContent`,
+      `https://generativelanguage.googleapis.com/v1beta/models/${sm}:generateContent`,
       {
         method: "POST",
         headers: { "x-goog-api-key": env("GEMINI_API_KEY"), "Content-Type": "application/json" },
@@ -198,7 +234,7 @@ async function summarize(body: any) {
     if (!r.ok) throw new Error(`Gemini: ${d.error?.message ?? r.status}`);
     raw = geminiText(d);
     const u = d.usageMetadata ?? {};
-    usd = usdOf(model || "gemini-3.5-flash", u.promptTokenCount ?? 0, (u.candidatesTokenCount ?? 0) + (u.thoughtsTokenCount ?? 0));
+    usd = usdOf(sm, u.promptTokenCount ?? 0, (u.candidatesTokenCount ?? 0) + (u.thoughtsTokenCount ?? 0));
   } else {
     const r = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -208,7 +244,7 @@ async function summarize(body: any) {
         "content-type": "application/json",
       },
       body: JSON.stringify({
-        model: model || "claude-sonnet-5-5",
+        model: sm,
         max_tokens: 8000,
         messages: [{ role: "user", content: user }],
       }),
@@ -216,7 +252,7 @@ async function summarize(body: any) {
     const d = await r.json();
     if (!r.ok) throw new Error(`Claude: ${d.error?.message ?? r.status}`);
     raw = (d.content ?? []).map((c: any) => c.text ?? "").join("");
-    usd = usdOf(model || "claude-sonnet-5-5", d.usage?.input_tokens ?? 0, d.usage?.output_tokens ?? 0);
+    usd = usdOf(sm, d.usage?.input_tokens ?? 0, d.usage?.output_tokens ?? 0);
   }
 
   const m = raw.match(/\{[\s\S]*\}/);
