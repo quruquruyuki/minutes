@@ -68,6 +68,7 @@
         <input type="file" id="importFile" accept="audio/*" class="hidden">
       </div>
     </div>
+    <div class="hint" id="monthCost" style="text-align:right;margin-top:12px"></div>
     <div class="list" id="list"></div>
   </main>
 </section>
@@ -113,7 +114,7 @@
 
 <!-- 設定 -->
 <dialog id="settings"><div class="dlg">
-  <h2 style="margin-top:0">設定</h2>
+  <h2 style="margin-top:0;outline:none" tabindex="-1" autofocus>設定</h2>
   <label>Supabase 関数URL</label><input id="sUrl" placeholder="https://xxxx.supabase.co/functions/v1/minutes">
   <label>パスコード</label><input id="sPass" type="password">
   <label>文字起こしに使うAI</label>
@@ -125,6 +126,7 @@
   <label>よく出る言葉（読点区切り。聞き間違いが減ります）</label>
   <textarea id="sHint" placeholder="例：抑肝散、補中益気湯、牛車腎気丸"></textarea>
   <label>録音の区切り（分）</label><input id="sSeg" type="number" min="1" max="20">
+  <label>料金表示の為替レート（1ドル＝何円）</label><input id="sRate" type="number" min="1" step="1">
   <div class="hint" style="margin-top:12px">仕事の会議ではOpenAI＋Claudeがおすすめです。Geminiの無料枠は送った内容がGoogleの改善に使われることがあります。</div>
   <div class="row" style="justify-content:flex-end"><button id="sClose">閉じる</button><button class="primary" id="sSave">保存</button></div>
 </div></dialog>
@@ -134,7 +136,7 @@
 <script>
 // ===== 設定 =====
 const DEF = { url:"", pass:"", tEngine:"openai", tModelOpenai:"gpt-4o-transcribe", tModelGemini:"gemini-3.5-flash",
-  sEngine:"claude", sModelClaude:"claude-sonnet-5-5", sModelGemini:"gemini-3.5-flash", hint:"", seg:5 };
+  sEngine:"claude", sModelClaude:"claude-sonnet-5-5", sModelGemini:"gemini-3.5-flash", hint:"", seg:5, rate:155 };
 let S = { ...DEF, ...JSON.parse(localStorage.getItem("minutes-settings") || "{}") };
 const $ = id => document.getElementById(id);
 const toast = (m, ms=2500) => { const t=$("toast"); t.textContent=m; t.classList.add("show"); clearTimeout(t._h); t._h=setTimeout(()=>t.classList.remove("show"), ms); };
@@ -143,7 +145,9 @@ function openSettings() {
   $("sUrl").value=S.url; $("sPass").value=S.pass; $("sTEngine").value=S.tEngine; $("sSEngine").value=S.sEngine;
   $("sTModel").value = S.tEngine==="gemini"?S.tModelGemini:S.tModelOpenai;
   $("sSModel").value = S.sEngine==="gemini"?S.sModelGemini:S.sModelClaude;
-  $("sHint").value=S.hint; $("sSeg").value=S.seg; $("settings").showModal();
+  $("sHint").value=S.hint; $("sSeg").value=S.seg; $("sRate").value=S.rate; $("settings").showModal();
+  // 開いた瞬間に入力欄へカーソルが入ってキーボードが出ないようにする
+  const ae = document.activeElement; if (ae && ["INPUT","TEXTAREA","SELECT"].includes(ae.tagName)) ae.blur();
 }
 $("sTEngine").onchange = e => $("sTModel").value = e.target.value==="gemini"?S.tModelGemini:S.tModelOpenai;
 $("sSEngine").onchange = e => $("sSModel").value = e.target.value==="gemini"?S.sModelGemini:S.sModelClaude;
@@ -153,9 +157,18 @@ $("sSave").onclick = () => {
   S.url=$("sUrl").value.trim(); S.pass=$("sPass").value; S.tEngine=$("sTEngine").value; S.sEngine=$("sSEngine").value;
   S[S.tEngine==="gemini"?"tModelGemini":"tModelOpenai"]=$("sTModel").value.trim();
   S[S.sEngine==="gemini"?"sModelGemini":"sModelClaude"]=$("sSModel").value.trim();
-  S.hint=$("sHint").value.trim(); S.seg=Math.min(20,Math.max(1,+$("sSeg").value||5));
-  localStorage.setItem("minutes-settings", JSON.stringify(S)); $("settings").close(); toast("保存しました");
+  S.hint=$("sHint").value.trim(); S.seg=Math.min(20,Math.max(1,+$("sSeg").value||5)); S.rate=+$("sRate").value||155;
+  localStorage.setItem("minutes-settings", JSON.stringify(S)); $("settings").close(); toast("保存しました"); renderList();
 };
+
+// ===== 料金 =====
+const yen = usd => { const y = usd*S.rate; return y < 10 ? y.toFixed(1) : Math.round(y).toLocaleString(); };
+const totalUsd = m => m.cost ? (m.cost.t||0)+(m.cost.s||0) : null;
+function addCost(kind, usd) {
+  cur.cost = cur.cost || { t:0, s:0, unknown:false };
+  if (usd == null) cur.cost.unknown = true; else cur.cost[kind] += usd;
+}
+const costLabel = m => { const u = totalUsd(m); if (u == null) return ""; return "約"+yen(u)+"円"+(m.cost.unknown?"＋α":""); };
 
 // ===== IndexedDB =====
 let db;
@@ -249,12 +262,16 @@ $("importFile").onchange = async e => {
 // ===== 一覧 =====
 async function renderList() {
   const ms = (await allMeetings()).filter(m=>m.status!=="録音中" || m.id===meeting?.id).sort((a,b)=>b.createdAt.localeCompare(a.createdAt));
+  const ym = new Date().toISOString().slice(0,7);
+  const mon = ms.filter(m=>m.createdAt.slice(0,7)===ym && m.cost);
+  const monUsd = mon.reduce((a,m)=>a+totalUsd(m),0);
+  $("monthCost").textContent = mon.length ? `今月のAI利用料 約${yen(monUsd)}円（${mon.length}件）` : "";
   $("list").innerHTML = ms.length ? "" : '<p class="hint" style="text-align:center;margin-top:24px">まだ記録がありません</p>';
   for (const m of ms) {
     const d = new Date(m.createdAt);
     const el = document.createElement("div"); el.className="item";
     const cls = m.status==="保存済み"?"ok":m.status==="エラー"?"ng":"";
-    el.innerHTML = `<div class="t"><b></b><small>${d.toLocaleDateString("ja-JP")} ${d.toLocaleTimeString("ja-JP",{hour:"2-digit",minute:"2-digit"})}${m.duration?"・"+fmt(m.duration):""}</small></div><span class="tag ${cls}">${m.status}</span>`;
+    el.innerHTML = `<div class="t"><b></b><small>${d.toLocaleDateString("ja-JP")} ${d.toLocaleTimeString("ja-JP",{hour:"2-digit",minute:"2-digit"})}${m.duration?"・"+fmt(m.duration):""}${m.cost?"・"+costLabel(m):""}</small></div><span class="tag ${cls}">${m.status}</span>`;
     el.querySelector("b").textContent = m.result?.title || m.title || "無題の録音";
     el.onclick = () => openDetail(m.id);
     $("list").appendChild(el);
@@ -270,7 +287,7 @@ async function openDetail(id) {
   cur = await getMeeting(id); const segs = await getSegments(id);
   const d = new Date(cur.createdAt);
   $("dTitle").textContent = cur.result?.title || cur.title || "無題の録音";
-  $("dMeta").textContent = `${d.toLocaleString("ja-JP")}　${cur.duration?fmt(cur.duration)+"　":""}${segs.length}ファイル　状態：${cur.status}`;
+  showMeta(segs.length);
   $("dMemo").value = cur.memo || "";
   $("dTranscript").value = cur.transcript || segs.filter(s=>s.text).map(s=>s.text).join("\n");
   $("prog").classList.add("hidden"); $("progText").textContent="";
@@ -286,6 +303,13 @@ async function openDetail(id) {
   fillResult(cur.result);
   $("notionLink").innerHTML = cur.notionUrl ? `<a href="${cur.notionUrl}" target="_blank">Notionで開く</a>` : "";
   show("detail");
+}
+
+function showMeta(n) {
+  const d = new Date(cur.createdAt);
+  const c = cur.cost ? `\n料金：文字起こし 約${yen(cur.cost.t)}円／議事録 約${yen(cur.cost.s)}円${cur.cost.unknown?"（料金表にないモデルの分は含まず）":""}` : "";
+  $("dMeta").style.whiteSpace = "pre-line";
+  $("dMeta").textContent = `${d.toLocaleString("ja-JP")}　${cur.duration?fmt(cur.duration)+"　":""}${n}ファイル　状態：${cur.status}${c}`;
 }
 
 function fillResult(r) {
@@ -324,6 +348,12 @@ async function api(body, isForm=false) {
 const setProg = (p, text) => { $("prog").classList.remove("hidden"); $("prog").firstElementChild.style.width=(p*100)+"%"; $("progText").textContent=text; };
 const busy = b => ["runBtn","resumBtn","saveBtn","back"].forEach(id=>$(id).disabled=b);
 
+const audioSeconds = blob => new Promise(res => {
+  const a = new Audio(); a.preload="metadata"; a.src = URL.createObjectURL(blob);
+  a.onloadedmetadata = () => res(isFinite(a.duration) ? Math.ceil(a.duration) : 0); a.onerror = () => res(0);
+  setTimeout(()=>res(0), 5000);
+});
+
 async function transcribeAll(force) {
   const segs = await getSegments(cur.id);
   if (force) for (const s of segs) { s.text=null; await putSegment(s); }
@@ -338,6 +368,7 @@ async function transcribeAll(force) {
     let model = S.tEngine==="gemini" ? S.tModelGemini : S.tModelOpenai;
     if (cur.source==="import" && S.tEngine==="openai") model = "whisper-1";
     fd.append("model", model);
+    if (model==="whisper-1") fd.append("seconds", String(await audioSeconds(s.blob)));
     fd.append("file", new File([s.blob], `seg${s.idx}.${ext}`, { type:s.mime || "audio/mp4" }));
     let d, tries=0;
     while (true) {
@@ -345,6 +376,7 @@ async function transcribeAll(force) {
       catch (e) { if (++tries>=2) throw e; await new Promise(r=>setTimeout(r,2000)); }
     }
     s.text = (d.text||"").trim(); await putSegment(s); done++;
+    addCost("t", d.usd); await putMeeting(cur);
   }
   cur.transcript = segs.map(s=>s.text).filter(Boolean).join("\n");
   $("dTranscript").value = cur.transcript;
@@ -356,7 +388,8 @@ async function summarizeNow() {
   cur.transcript = $("dTranscript").value.trim(); cur.memo = $("dMemo").value.trim();
   const d = await api({ action:"summarize", transcript:cur.transcript, memo:cur.memo, engine:S.sEngine,
     model: S.sEngine==="gemini"?S.sModelGemini:S.sModelClaude });
-  cur.result = d.result; cur.status="作成済み"; await putMeeting(cur);
+  cur.result = d.result; cur.status="作成済み"; addCost("s", d.usd); await putMeeting(cur);
+  showMeta((await getSegments(cur.id)).length);
   setProg(1, "できました。内容を確認してNotionに保存してください");
   $("dTitle").textContent = cur.result.title || "議事録"; fillResult(cur.result);
 }
