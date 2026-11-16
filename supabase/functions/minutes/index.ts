@@ -19,6 +19,7 @@ const env = (...keys: string[]) => {
   return "";
 };
 const MINUTES_DS = () => env("MINUTES_DATA_SOURCE_ID") || "41a85790-2406-818c-9fb4-000b58841972";
+const SEMINAR_DS = () => env("SEMINAR_DATA_SOURCE_ID") || "41a85790-2406-8160-a503-000b3ff716d6"; // Tsumura wiki / セミナーノート
 // 料金表（USD／100万トークン）。2026年11月時点の公表価格。変わったらここを直す
 const PRICE: Record<string, { ain?: number; in: number; out: number }> = {
   "gpt-4o-transcribe": { ain: 6, in: 2.5, out: 10 },
@@ -159,10 +160,25 @@ const SUMMARY_PROMPT = `以下は会議・打ち合わせ・会話の文字起�
   "todos": [{"task": "やること", "owner": "担当（不明なら空）", "due": "期限（不明なら空）"}]
 }`;
 
+const SEMINAR_PROMPT = `以下は製品や疾患に関するセミナー・講演の文字起こしです。製薬会社のMRがあとで見返して、医師との面談に活かせるノートを日本語で作ってください。
+文字起こしには聞き間違いが含まれることがあります。薬剤名・疾患名・試験名は文脈から正しい表記に直してください。
+数値・試験名・ガイドラインなどは、話された内容をそのまま正確に残し、話されていないことは推測で足さないでください。
+次のJSONだけを出力してください（前後に説明文やコードブロックを付けない）:
+{
+  "title": "演題が分かる短いタイトル",
+  "speaker": "演者名と所属（分かる範囲。不明なら空）",
+  "summary": "3〜5文の要約",
+  "keywords": ["疾患名・製品名・試験名など検索に使う語を3〜8個"],
+  "topics": [{"heading": "セクションの見出し", "points": ["要点"]}],
+  "data": ["出てきたデータ・エビデンス（試験名、対象、結果の数値などを1項目ずつ）"],
+  "qa": [{"q": "質問", "a": "回答"}],
+  "tips": ["医師との面談で話題にできそうなポイント"]
+}`;
+
 async function summarize(body: any) {
-  const { transcript, engine = "claude", model = "", memo = "" } = body;
+  const { transcript, engine = "claude", model = "", memo = "", mode = "meeting" } = body;
   if (!transcript) throw new Error("文字起こしが空です");
-  const user = `${SUMMARY_PROMPT}${memo ? `\n\n補足メモ: ${memo}` : ""}\n\n--- 文字起こし ---\n${transcript}`;
+  const user = `${mode === "seminar" ? SEMINAR_PROMPT : SUMMARY_PROMPT}${memo ? `\n\n補足メモ: ${memo}` : ""}\n\n--- 文字起こし ---\n${transcript}`;
   let raw = "";
   let usd: number | null = null;
 
@@ -236,7 +252,46 @@ async function notion(path: string, method: string, body: unknown) {
   return d;
 }
 
+async function saveSeminar(body: any) {
+  const { result: x, transcript = "", date, duration = "" } = body;
+  const blocks: any[] = [];
+  const meta = [x.speaker && `演者: ${x.speaker}`, duration && `録音時間: ${duration}`].filter(Boolean).join("　");
+  if (meta) blocks.push(para(meta));
+  blocks.push(h2("要約"), ...chunk(x.summary || "-").map(para));
+  if (x.topics?.length) {
+    blocks.push(h2("要点"));
+    for (const t of x.topics) {
+      blocks.push(h3(t.heading || "要点"));
+      for (const p of t.points ?? []) blocks.push(li(p));
+    }
+  }
+  if (x.data?.length) blocks.push(h2("データ・エビデンス"), ...x.data.map(li));
+  if (x.qa?.length) {
+    blocks.push(h2("質疑応答"));
+    for (const q of x.qa) blocks.push(li(`Q. ${q.q}`), para(`A. ${q.a}`));
+  }
+  if (x.tips?.length) blocks.push(h2("面談で使えるポイント"), ...x.tips.map(li));
+  if (transcript) blocks.push(h2("文字起こし全文"), ...chunk(transcript).map(para));
+
+  const kw = [...new Set((x.keywords ?? []).map((k: string) => String(k).replace(/,/g, " ").trim().slice(0, 90)).filter(Boolean))].slice(0, 10);
+  const page = await notion("pages", "POST", {
+    parent: { type: "data_source_id", data_source_id: SEMINAR_DS() },
+    properties: {
+      "名前": { title: rt(x.title || "セミナーノート") },
+      "日付": { date: { start: date || new Date().toISOString().slice(0, 10) } },
+      "演者": { rich_text: rt((x.speaker || "").slice(0, 1900)) },
+      "キーワード": { multi_select: kw.map((name) => ({ name })) },
+    },
+    children: blocks.slice(0, 100),
+  });
+  for (let i = 100; i < blocks.length; i += 100) {
+    await notion(`blocks/${page.id}/children`, "PATCH", { children: blocks.slice(i, i + 100) });
+  }
+  return { url: page.url };
+}
+
 async function saveToNotion(body: any) {
+  if (body.mode === "seminar") return saveSeminar(body);
   const { result: x, transcript = "", date, duration = "" } = body;
   const blocks: any[] = [];
   const meta = [`ジャンル: ${x.genre || "-"}`, duration && `録音時間: ${duration}`].filter(Boolean).join("　");

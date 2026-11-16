@@ -47,6 +47,10 @@
   audio { width:100%; margin-top:6px; }
   .seg { font-size:13px; color:var(--sub); margin-top:8px; }
   .hidden { display:none !important; }
+  .seg2 { display:inline-flex; background:var(--soft); border-radius:9px; padding:3px; margin-bottom:18px; }
+  .seg2 button { border:none; border-radius:7px; padding:7px 18px; color:var(--sub); }
+  .seg2 button.on { background:#fff; color:var(--fg); box-shadow:0 1px 2px rgba(0,0,0,.12); font-weight:600; }
+  .tag.sem { background:#e7f0fb; color:#1f5aa6; }
   dialog { border:none; border-radius:14px; padding:0; width:min(92vw,520px); max-height:85vh; }
   dialog::backdrop { background:rgba(0,0,0,.3); }
   .dlg { padding:16px 18px 20px; overflow:auto; max-height:85vh; }
@@ -76,6 +80,7 @@
   <header><h1>議事録</h1><button class="icon" id="openSettings" aria-label="設定">⚙︎</button></header>
   <main>
     <div class="rec">
+      <div class="seg2" id="modeSeg"><button data-m="meeting">会議</button><button data-m="seminar">セミナー</button></div><br>
       <button class="recbtn" id="recBtn" aria-label="録音"><span></span></button>
       <div class="timer" id="timer">00:00</div>
       <div class="hint" id="recHint">タップで録音開始。録音中は画面を開いたままにしてください。</div>
@@ -95,8 +100,10 @@
   <main>
     <div class="card">
       <div id="dMeta" class="hint"></div>
-      <label>補足メモ（会議名・参加者など。要約の精度が上がります）</label>
-      <input id="dMemo" placeholder="例：〇〇病院 勉強会打ち合わせ／山田先生・佐藤さん">
+      <label>種類</label>
+      <select id="dMode"><option value="meeting">会議（議事録）</option><option value="seminar">セミナー（セミナーノート）</option></select>
+      <label id="dMemoLabel">補足メモ</label>
+      <input id="dMemo">
       <div class="row">
         <button class="primary" id="runBtn">文字起こしして議事録を作る</button>
       </div>
@@ -107,12 +114,23 @@
     <div id="resultArea" class="hidden">
       <label>タイトル</label><input id="rTitle">
       <label>日付</label><input id="rDate" type="date">
+      <div id="meetFields">
       <label>ジャンル</label><input id="rGenre">
       <label>要約</label><textarea id="rSummary"></textarea>
       <label>参加者（読点区切り）</label><input id="rPeople">
       <label>議題と要点（「## 議題」の下に「- 要点」）</label><textarea id="rTopics" style="min-height:160px"></textarea>
       <label>決定事項（1行に1つ）</label><textarea id="rDecisions"></textarea>
       <label>ToDo（1行に1つ。「やること / 担当 / 期限」）</label><textarea id="rTodos"></textarea>
+      </div>
+      <div id="semFields">
+      <label>演者（名前・所属）</label><input id="zSpeaker">
+      <label>キーワード（読点区切り）</label><input id="zKeywords">
+      <label>要約</label><textarea id="zSummary"></textarea>
+      <label>要点（「## 見出し」の下に「- 要点」）</label><textarea id="zTopics" style="min-height:160px"></textarea>
+      <label>データ・エビデンス（1行に1つ）</label><textarea id="zData"></textarea>
+      <label>質疑応答（「Q. 質問」の次の行に「A. 回答」）</label><textarea id="zQa"></textarea>
+      <label>面談で使えるポイント（1行に1つ）</label><textarea id="zTips"></textarea>
+      </div>
       <div class="row">
         <button id="resumBtn">要約だけ作り直す</button>
         <button class="primary" id="saveBtn">Notionに保存</button>
@@ -137,8 +155,10 @@
   <label>議事録づくりに使うAI</label>
   <select id="sSEngine"><option value="claude">Claude</option><option value="gemini">Gemini</option></select>
   <label>議事録づくりのモデル名</label><input id="sSModel">
-  <label>よく出る言葉（読点区切り。聞き間違いが減ります）</label>
-  <textarea id="sHint" placeholder="例：抑肝散、補中益気湯、牛車腎気丸"></textarea>
+  <label>よく出る言葉・会議（読点区切り。聞き間違いが減ります）</label>
+  <textarea id="sHint" placeholder="例：〇〇病院、勉強会、説明会"></textarea>
+  <label>よく出る言葉・セミナー（疾患名・製品名・試験名など）</label>
+  <textarea id="sHintSem" placeholder="例：抑肝散、補中益気湯、牛車腎気丸、フレイル"></textarea>
   <label>録音の区切り（分）</label><input id="sSeg" type="number" min="1" max="20">
   <label>料金表示の為替レート（1ドル＝何円）</label><input id="sRate" type="number" min="1" step="1">
   <div class="hint" style="margin-top:12px">仕事の会議ではOpenAI＋Claudeがおすすめです。Geminiの無料枠は送った内容がGoogleの改善に使われることがあります。</div>
@@ -156,7 +176,7 @@ async function token() { const { data } = await sb.auth.getSession(); return dat
 
 // ===== 設定 =====
 const DEF = { url:SB_URL+"/functions/v1/minutes", tEngine:"openai", tModelOpenai:"gpt-4o-transcribe", tModelGemini:"gemini-3.5-flash",
-  sEngine:"claude", sModelClaude:"claude-sonnet-5-5", sModelGemini:"gemini-3.5-flash", hint:"", seg:5, rate:155 };
+  sEngine:"claude", sModelClaude:"claude-sonnet-5-5", sModelGemini:"gemini-3.5-flash", hint:"", hintSem:"", seg:5, rate:155, mode:"meeting" };
 let S = { ...DEF, ...JSON.parse(localStorage.getItem("minutes-settings") || "{}") };
 S.url = DEF.url;
 const $ = id => document.getElementById(id);
@@ -166,7 +186,7 @@ function openSettings() {
   $("sTEngine").value=S.tEngine; $("sSEngine").value=S.sEngine;
   $("sTModel").value = S.tEngine==="gemini"?S.tModelGemini:S.tModelOpenai;
   $("sSModel").value = S.sEngine==="gemini"?S.sModelGemini:S.sModelClaude;
-  $("sHint").value=S.hint; $("sSeg").value=S.seg; $("sRate").value=S.rate; $("settings").showModal();
+  $("sHint").value=S.hint; $("sHintSem").value=S.hintSem; $("sSeg").value=S.seg; $("sRate").value=S.rate; $("settings").showModal();
   // 開いた瞬間に入力欄へカーソルが入ってキーボードが出ないようにする
   const ae = document.activeElement; if (ae && ["INPUT","TEXTAREA","SELECT"].includes(ae.tagName)) ae.blur();
 }
@@ -178,7 +198,7 @@ $("sSave").onclick = () => {
   S.tEngine=$("sTEngine").value; S.sEngine=$("sSEngine").value;
   S[S.tEngine==="gemini"?"tModelGemini":"tModelOpenai"]=$("sTModel").value.trim();
   S[S.sEngine==="gemini"?"sModelGemini":"sModelClaude"]=$("sSModel").value.trim();
-  S.hint=$("sHint").value.trim(); S.seg=Math.min(20,Math.max(1,+$("sSeg").value||5)); S.rate=+$("sRate").value||155;
+  S.hint=$("sHint").value.trim(); S.hintSem=$("sHintSem").value.trim(); S.seg=Math.min(20,Math.max(1,+$("sSeg").value||5)); S.rate=+$("sRate").value||155;
   localStorage.setItem("minutes-settings", JSON.stringify(S)); $("settings").close(); toast("保存しました"); renderList();
 };
 
@@ -215,6 +235,15 @@ async function deleteMeeting(id) {
   await req(tx("meetings","readwrite").delete(id));
 }
 
+// ===== 会議／セミナー =====
+const MODE_NAME = { meeting:"会議", seminar:"セミナー" };
+function paintMode() { document.querySelectorAll("#modeSeg button").forEach(b => b.classList.toggle("on", b.dataset.m===S.mode)); }
+document.querySelectorAll("#modeSeg button").forEach(b => b.onclick = () => {
+  S.mode = b.dataset.m; localStorage.setItem("minutes-settings", JSON.stringify(S)); paintMode();
+});
+paintMode();
+const modeOf = m => m.mode || "meeting";
+
 // ===== 録音 =====
 let stream, recorder, meeting, segIdx=0, startAt=0, tick, segTimer, wakeLock, chunks=[];
 const mime = ["audio/mp4","audio/webm;codecs=opus","audio/webm"].find(t => window.MediaRecorder && MediaRecorder.isTypeSupported(t)) || "";
@@ -240,7 +269,7 @@ async function startRec() {
   try { stream = await navigator.mediaDevices.getUserMedia({ audio:{ echoCancellation:true, noiseSuppression:true } }); }
   catch { return toast("マイクを使う許可が必要です"); }
   const now = new Date();
-  meeting = { id:"m"+now.getTime(), title:"", createdAt:now.toISOString(), duration:0, status:"録音中", source:"rec" };
+  meeting = { id:"m"+now.getTime(), title:"", createdAt:now.toISOString(), duration:0, status:"録音中", source:"rec", mode:S.mode };
   await putMeeting(meeting);
   segIdx=0; startAt=Date.now(); startSegment();
   segTimer = setInterval(() => { recorder.stop(); startSegment(); }, S.seg*60*1000);
@@ -274,7 +303,7 @@ $("importFile").onchange = async e => {
   const f = e.target.files[0]; e.target.value=""; if (!f) return;
   if (f.size > 24*1024*1024) return toast("24MBまでのファイルに対応しています", 3500);
   const now = new Date();
-  const m = { id:"m"+now.getTime(), title:f.name.replace(/\.[^.]+$/,""), createdAt:now.toISOString(), duration:0, status:"未処理", source:"import" };
+  const m = { id:"m"+now.getTime(), title:f.name.replace(/\.[^.]+$/,""), createdAt:now.toISOString(), duration:0, status:"未処理", source:"import", mode:S.mode };
   await putMeeting(m);
   await addSegment({ meetingId:m.id, idx:0, blob:f, mime:f.type, text:null, name:f.name });
   renderList(); openDetail(m.id);
@@ -292,7 +321,7 @@ async function renderList() {
     const d = new Date(m.createdAt);
     const el = document.createElement("div"); el.className="item";
     const cls = m.status==="保存済み"?"ok":m.status==="エラー"?"ng":"";
-    el.innerHTML = `<div class="t"><b></b><small>${d.toLocaleDateString("ja-JP")} ${d.toLocaleTimeString("ja-JP",{hour:"2-digit",minute:"2-digit"})}${m.duration?"・"+fmt(m.duration):""}${m.cost?"・"+costLabel(m):""}</small></div><span class="tag ${cls}">${m.status}</span>`;
+    el.innerHTML = `<div class="t"><b></b><small>${d.toLocaleDateString("ja-JP")} ${d.toLocaleTimeString("ja-JP",{hour:"2-digit",minute:"2-digit"})}${m.duration?"・"+fmt(m.duration):""}${m.cost?"・"+costLabel(m):""}</small></div>${modeOf(m)==="seminar"?'<span class="tag sem">セミナー</span>':""}<span class="tag ${cls}">${m.status}</span>`;
     el.querySelector("b").textContent = m.result?.title || m.title || "無題の録音";
     el.onclick = () => openDetail(m.id);
     $("list").appendChild(el);
@@ -310,6 +339,7 @@ async function openDetail(id) {
   $("dTitle").textContent = cur.result?.title || cur.title || "無題の録音";
   showMeta(segs.length);
   $("dMemo").value = cur.memo || "";
+  $("dMode").value = modeOf(cur); paintDetailMode();
   $("dTranscript").value = cur.transcript || segs.filter(s=>s.text).map(s=>s.text).join("\n");
   $("prog").classList.add("hidden"); $("progText").textContent="";
   $("runBtn").textContent = cur.result ? "最初から作り直す" : "文字起こしして議事録を作る";
@@ -333,9 +363,30 @@ function showMeta(n) {
   $("dMeta").textContent = `${d.toLocaleString("ja-JP")}　${cur.duration?fmt(cur.duration)+"　":""}${n}ファイル　状態：${cur.status}${c}`;
 }
 
+function paintDetailMode() {
+  const sem = modeOf(cur)==="seminar";
+  $("dMemoLabel").textContent = sem ? "補足メモ（演題・演者・主催など。まとめの精度が上がります）" : "補足メモ（会議名・参加者など。要約の精度が上がります）";
+  $("dMemo").placeholder = sem ? "例：〇〇学会 ランチョンセミナー／△△大学 □□先生" : "例：〇〇病院 勉強会打ち合わせ／山田先生・佐藤さん";
+  $("meetFields").classList.toggle("hidden", sem); $("semFields").classList.toggle("hidden", !sem);
+  $("saveBtn").textContent = sem ? "Notionのセミナーノートに保存" : "Notionに保存";
+}
+$("dMode").onchange = async () => {
+  cur.mode = $("dMode").value; await putMeeting(cur); paintDetailMode();
+  if (cur.result) toast("種類を変えたので「要約だけ作り直す」を押してください", 3500);
+};
+
 function fillResult(r) {
   $("resultArea").classList.toggle("hidden", !r); if (!r) return;
-  $("rTitle").value = r.title||""; $("rGenre").value = r.genre||""; $("rSummary").value = r.summary||"";
+  $("rTitle").value = r.title||""; $("rDate").value = cur.date || cur.createdAt.slice(0,10);
+  if (modeOf(cur)==="seminar") {
+    $("zSpeaker").value = r.speaker||""; $("zKeywords").value = (r.keywords||[]).join("、"); $("zSummary").value = r.summary||"";
+    $("zTopics").value = (r.topics||[]).map(t=>`## ${t.heading}\n`+(t.points||[]).map(p=>`- ${p}`).join("\n")).join("\n\n");
+    $("zData").value = (r.data||[]).join("\n");
+    $("zQa").value = (r.qa||[]).map(x=>`Q. ${x.q}\nA. ${x.a}`).join("\n");
+    $("zTips").value = (r.tips||[]).join("\n");
+    return;
+  }
+  $("rGenre").value = r.genre||""; $("rSummary").value = r.summary||"";
   $("rDate").value = cur.date || cur.createdAt.slice(0,10);
   $("rPeople").value = (r.participants||[]).join("、");
   $("rTopics").value = (r.topics||[]).map(t=>`## ${t.heading}\n`+(t.points||[]).map(p=>`- ${p}`).join("\n")).join("\n\n");
@@ -343,14 +394,33 @@ function fillResult(r) {
   $("rTodos").value = (r.todos||[]).map(t=>[t.task,t.owner,t.due].filter(Boolean).join(" / ")).join("\n");
 }
 
+function parseTopics(text) {
+  const topics=[]; let t=null;
+  for (const line of text.split("\n")) {
+    const l=line.trim(); if(!l) continue;
+    if (l.startsWith("#")) { t={heading:l.replace(/^#+\s*/,""),points:[]}; topics.push(t); }
+    else { if(!t){t={heading:"要点",points:[]};topics.push(t);} t.points.push(l.replace(/^[-・*]\s*/,"")); }
+  }
+  return topics;
+}
 function readResult() {
+  const lines = id => $(id).value.split("\n").map(s=>s.trim()).filter(Boolean);
+  if (modeOf(cur)==="seminar") {
+    const qa=[]; for (const l of lines("zQa")) {
+      if (/^Q[.．:：]?\s*/i.test(l)) qa.push({q:l.replace(/^Q[.．:：]?\s*/i,""),a:""});
+      else if (qa.length) qa[qa.length-1].a += (qa[qa.length-1].a?" ":"") + l.replace(/^A[.．:：]?\s*/i,"");
+    }
+    return { title:$("rTitle").value.trim(), speaker:$("zSpeaker").value.trim(),
+      keywords:$("zKeywords").value.split(/[、,]/).map(s=>s.trim()).filter(Boolean),
+      summary:$("zSummary").value.trim(), topics:parseTopics($("zTopics").value),
+      data:lines("zData"), qa, tips:lines("zTips") };
+  }
   const topics=[]; let t=null;
   for (const line of $("rTopics").value.split("\n")) {
     const l=line.trim(); if(!l) continue;
     if (l.startsWith("#")) { t={heading:l.replace(/^#+\s*/,""),points:[]}; topics.push(t); }
     else { if(!t){t={heading:"要点",points:[]};topics.push(t);} t.points.push(l.replace(/^[-・*]\s*/,"")); }
   }
-  const lines = id => $(id).value.split("\n").map(s=>s.trim()).filter(Boolean);
   return { title:$("rTitle").value.trim(), genre:$("rGenre").value.trim(), summary:$("rSummary").value.trim(),
     participants:$("rPeople").value.split(/[、,]/).map(s=>s.trim()).filter(Boolean), topics,
     decisions:lines("rDecisions"),
@@ -386,7 +456,7 @@ async function transcribeAll(force) {
     setProg(done/(segs.length+1), `文字起こし中… ${done+1}／${segs.length}`);
     const fd = new FormData();
     const ext = (s.mime||"").includes("webm")?"webm":(s.name?.split(".").pop()||"m4a");
-    fd.append("action","transcribe"); fd.append("engine",S.tEngine); fd.append("hint",S.hint);
+    fd.append("action","transcribe"); fd.append("engine",S.tEngine); fd.append("hint", modeOf(cur)==="seminar" ? S.hintSem : S.hint);
     // 読み込んだファイルは長さが分からないので、OpenAIでは長い音声も扱えるwhisper-1を使う
     let model = S.tEngine==="gemini" ? S.tModelGemini : S.tModelOpenai;
     if (cur.source==="import" && S.tEngine==="openai") model = "whisper-1";
@@ -409,7 +479,7 @@ async function transcribeAll(force) {
 async function summarizeNow() {
   setProg(.92, "議事録を作成中…");
   cur.transcript = $("dTranscript").value.trim(); cur.memo = $("dMemo").value.trim();
-  const d = await api({ action:"summarize", transcript:cur.transcript, memo:cur.memo, engine:S.sEngine,
+  const d = await api({ action:"summarize", mode:modeOf(cur), transcript:cur.transcript, memo:cur.memo, engine:S.sEngine,
     model: S.sEngine==="gemini"?S.sModelGemini:S.sModelClaude });
   cur.result = d.result; cur.status="作成済み"; addCost("s", d.usd); await putMeeting(cur);
   showMeta((await getSegments(cur.id)).length);
@@ -430,11 +500,11 @@ $("saveBtn").onclick = async () => {
   busy(true); $("saveBtn").textContent="保存中…";
   try {
     cur.result = readResult(); cur.date = $("rDate").value; cur.transcript = $("dTranscript").value.trim();
-    const d = await api({ action:"save", result:cur.result, transcript:cur.transcript, date:cur.date, duration:cur.duration?fmt(cur.duration):"" });
+    const d = await api({ action:"save", mode:modeOf(cur), result:cur.result, transcript:cur.transcript, date:cur.date, duration:cur.duration?fmt(cur.duration):"" });
     cur.notionUrl = d.url; cur.status="保存済み"; await putMeeting(cur);
     $("notionLink").innerHTML = `<a href="${d.url}" target="_blank">Notionで開く</a>`; toast("Notionに保存しました");
   } catch (e) { toast("保存できませんでした："+e.message, 4000); }
-  $("saveBtn").textContent="Notionに保存"; busy(false);
+  paintDetailMode(); busy(false);
 };
 
 $("delBtn").onclick = async () => {
