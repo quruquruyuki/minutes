@@ -47,6 +47,11 @@
   audio { width:100%; margin-top:6px; }
   .seg { font-size:13px; color:var(--sub); margin-top:8px; }
   .hidden { display:none !important; }
+  .meter { margin:4px auto 6px; width:min(260px,70vw); }
+  .mbar { position:relative; height:10px; background:var(--soft); border-radius:5px; overflow:hidden; }
+  .mbar div { height:100%; width:0; border-radius:5px; background:#9b9a97; transition:width .08s linear; }
+  .mbar i { position:absolute; top:0; bottom:0; width:2px; background:rgba(55,53,47,.25); }
+  .mtext { font-size:13px; margin-top:6px; font-weight:600; }
   .seg2 { display:inline-flex; background:var(--soft); border-radius:9px; padding:3px; margin-bottom:18px; }
   .seg2 button { border:none; border-radius:7px; padding:7px 18px; color:var(--sub); }
   .seg2 button.on { background:#fff; color:var(--fg); box-shadow:0 1px 2px rgba(0,0,0,.12); font-weight:600; }
@@ -83,6 +88,10 @@
       <div class="seg2" id="modeSeg"><button data-m="meeting">会議</button><button data-m="seminar">セミナー</button></div><br>
       <button class="recbtn" id="recBtn" aria-label="録音"><span></span></button>
       <div class="timer" id="timer">00:00</div>
+      <div class="meter hidden" id="meter">
+        <div class="mbar"><div id="mfill"></div><i style="left:36.7%"></i><i style="left:90%"></i></div>
+        <div class="mtext" id="mtext"></div>
+      </div>
       <div class="hint" id="recHint">タップで録音開始。録音中は画面を開いたままにしてください。</div>
       <div class="hint" style="margin-top:6px">画面を消して録るときは、iPhoneの「ボイスメモ」で録音して下から読み込んでください（長さの制限なし）</div>
       <div class="row">
@@ -294,13 +303,64 @@ function startSegment() {
   recorder = rec;
 }
 
+// ===== 音量メーター =====
+// 声の大きさ（dB）を見て、文字起こしに十分な音量かを表示する
+let actx = null, meterSrc = null, meterRAF = 0, mStats = { total:0, voice:0 };
+function levelState(db) {
+  if (db < -50) return { t:"音を拾えていません（マイクが遠いか、周りが静かです）", c:"#e03e3e" };
+  if (db < -38) return { t:"小さめです。スマホを話す人に近づけてください", c:"#d9730d" };
+  if (db > -6)  return { t:"大きすぎます。少し離してください", c:"#d9730d" };
+  return { t:"ちょうどいい音量です", c:"#0f7b6c" };
+}
+function startMeter(st) {
+  try {
+    actx.resume?.();
+    meterSrc = actx.createMediaStreamSource(st);
+    const an = actx.createAnalyser(); an.fftSize = 2048; meterSrc.connect(an);
+    const data = new Float32Array(an.fftSize);
+    let shown = -90, winMax = -90, winStart = performance.now(); const recent = [];
+    mStats = { total:0, voice:0 };
+    $("meter").classList.remove("hidden");
+    const loop = () => {
+      an.getFloatTimeDomainData(data);
+      let sum = 0; for (let i = 0; i < data.length; i++) sum += data[i]*data[i];
+      const db = 20*Math.log10(Math.sqrt(sum/data.length) + 1e-9);
+      shown = Math.max(db, shown - 1.2);           // 針がゆっくり下がるように
+      winMax = Math.max(winMax, db);
+      $("mfill").style.width = Math.max(0, Math.min(100, (shown+60)/60*100)) + "%";
+      const now = performance.now();
+      if (now - winStart >= 1000) {                // 1秒ごとに判定を更新
+        recent.push(winMax); if (recent.length > 3) recent.shift();
+        mStats.total++; if (winMax > -40) mStats.voice++;
+        const st2 = levelState(Math.max(...recent));
+        $("mtext").textContent = st2.t; $("mtext").style.color = st2.c; $("mfill").style.background = st2.c;
+        winMax = -90; winStart = now;
+      }
+      meterRAF = requestAnimationFrame(loop);
+    };
+    $("mtext").textContent = "音量を確認しています…"; $("mtext").style.color = "var(--sub)";
+    loop();
+  } catch (e) { $("meter").classList.add("hidden"); }
+}
+function stopMeter() {
+  cancelAnimationFrame(meterRAF);
+  try { meterSrc?.disconnect(); } catch {}
+  meterSrc = null; $("meter").classList.add("hidden"); $("mfill").style.width = "0";
+  // 録音全体で声を拾えていた時間が少なければ知らせる
+  if (mStats.total >= 10 && mStats.voice/mStats.total < 0.2)
+    setTimeout(() => toast("録音中、音が小さい時間が長めでした。文字起こしの精度が落ちるかもしれません", 5000), 800);
+}
+
 async function startRec() {
+  // iPhoneはタップした瞬間でないと音の処理を始められないので、最初に用意する
+  try { actx = actx || new (window.AudioContext || window.webkitAudioContext)(); actx.resume?.(); } catch {}
   try { stream = await navigator.mediaDevices.getUserMedia({ audio:{ echoCancellation:true, noiseSuppression:true } }); }
   catch { return toast("マイクを使う許可が必要です"); }
   const now = new Date();
   meeting = { id:"m"+now.getTime(), title:"", createdAt:now.toISOString(), duration:0, status:"録音中", source:"rec", mode:S.mode };
   await putMeeting(meeting);
   segIdx=0; startAt=Date.now(); startSegment();
+  if (actx) startMeter(stream);
   segTimer = setInterval(() => { recorder.stop(); startSegment(); }, S.seg*60*1000);
   tick = setInterval(() => $("timer").textContent = fmt((Date.now()-startAt)/1000), 500);
   try { wakeLock = await navigator.wakeLock?.request("screen"); } catch {}
@@ -309,7 +369,7 @@ async function startRec() {
 }
 
 async function stopRec() {
-  clearInterval(segTimer); clearInterval(tick);
+  clearInterval(segTimer); clearInterval(tick); stopMeter();
   await new Promise(r => { const prev=recorder.onstop; recorder.onstop=async()=>{ await prev(); r(); }; recorder.stop(); });
   stream.getTracks().forEach(t=>t.stop());
   try { await wakeLock?.release(); } catch {}
