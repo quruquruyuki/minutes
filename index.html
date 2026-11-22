@@ -88,6 +88,10 @@
       <div class="seg2" id="modeSeg"><button data-m="meeting">会議</button><button data-m="seminar">セミナー</button></div><br>
       <button class="recbtn" id="recBtn" aria-label="録音"><span></span></button>
       <div class="timer" id="timer">00:00</div>
+      <div id="recAlert" class="hidden" style="margin:8px auto;max-width:420px;background:#ffe2dd;color:#5d1715;border-radius:10px;padding:10px 12px;font-size:14px;line-height:1.5">
+        <div id="recAlertText"></div>
+        <button class="primary" id="recResume" style="margin-top:8px">録音を再開する</button>
+      </div>
       <div class="meter hidden" id="meter">
         <div class="mbar"><div id="mfill"></div><i style="left:36.7%"></i><i style="left:90%"></i></div>
         <div class="mtext" id="mtext"></div>
@@ -294,7 +298,7 @@ function startSegment() {
   const thisIdx = segIdx++;
   const mid = meeting.id;
   const rec = new MediaRecorder(stream, mime ? { mimeType:mime, audioBitsPerSecond:64000 } : {});
-  rec.ondataavailable = e => e.data.size && parts.push(e.data);
+  rec.ondataavailable = e => { if (e.data.size) { parts.push(e.data); lastData = Date.now(); } };
   rec.onstop = async () => {
     const blob = new Blob(parts, { type: rec.mimeType || mime || "audio/mp4" });
     if (blob.size) await addSegment({ meetingId:mid, idx:thisIdx, blob, mime:blob.type, text:null });
@@ -342,6 +346,11 @@ function startMeter(st) {
     loop();
   } catch (e) { $("meter").classList.add("hidden"); }
 }
+function stopMeterSilently() {
+  cancelAnimationFrame(meterRAF);
+  try { meterSrc?.disconnect(); } catch {}
+  meterSrc = null;
+}
 function stopMeter() {
   cancelAnimationFrame(meterRAF);
   try { meterSrc?.disconnect(); } catch {}
@@ -359,9 +368,10 @@ async function startRec() {
   const now = new Date();
   meeting = { id:"m"+now.getTime(), title:"", createdAt:now.toISOString(), duration:0, status:"録音中", source:"rec", mode:S.mode };
   await putMeeting(meeting);
+  recording = true; gaps = []; gapStart = null; lastData = Date.now(); watchTrack();
   segIdx=0; startAt=Date.now(); startSegment();
   if (actx) startMeter(stream);
-  segTimer = setInterval(() => { recorder.stop(); startSegment(); }, S.seg*60*1000);
+  segTimer = setInterval(() => { if (recorder?.state !== "recording") return; recorder.stop(); startSegment(); }, S.seg*60*1000);
   tick = setInterval(() => $("timer").textContent = fmt((Date.now()-startAt)/1000), 500);
   try { wakeLock = await navigator.wakeLock?.request("screen"); } catch {}
   $("recBtn").classList.add("on");
@@ -369,22 +379,68 @@ async function startRec() {
 }
 
 async function stopRec() {
-  clearInterval(segTimer); clearInterval(tick); stopMeter();
-  await new Promise(r => { const prev=recorder.onstop; recorder.onstop=async()=>{ await prev(); r(); }; recorder.stop(); });
-  stream.getTracks().forEach(t=>t.stop());
+  recording = false; clearInterval(segTimer); clearInterval(tick); stopMeter(); $("recAlert").classList.add("hidden");
+  if (recorder?.state === "recording") await new Promise(r => { const prev=recorder.onstop; recorder.onstop=async()=>{ await prev(); r(); }; recorder.stop(); });
+  stream?.getTracks().forEach(t=>t.stop());
   try { await wakeLock?.release(); } catch {}
-  meeting.duration = (Date.now()-startAt)/1000; meeting.status="未処理";
+  if (gapStart) { gaps.push({ from:gapStart, to:Date.now() }); gapStart = null; }
+  const lost = gaps.reduce((a,g)=>a+(g.to-g.from),0);
+  // 実際に録れていた時間（録れていなかった時間を引く）
+  meeting.duration = Math.max(0, (Date.now()-startAt-lost)/1000); meeting.gaps = gaps; meeting.status="未処理";
   await putMeeting(meeting);
   $("recBtn").classList.remove("on"); $("timer").textContent="00:00";
   $("recHint").textContent="タップで録音開始。録音中は画面を開いたままにしてください。";
   const id = meeting.id; meeting=null; renderList(); openDetail(id);
+  if (lost > 5000) setTimeout(() => toast(`途中で約${Math.round(lost/60000)||1}分、録音できていない時間がありました`, 5000), 600);
 }
-$("recBtn").onclick = () => recorder?.state==="recording" ? stopRec() : startRec();
-document.addEventListener("visibilitychange", async () => {
-  if (document.visibilityState==="visible" && recorder?.state==="recording") {
+$("recBtn").onclick = () => recording ? stopRec() : startRec();
+
+// ===== 録音が止まったときの検知と再開 =====
+// iPhoneは画面を消したりアプリを切り替えるとマイクを止める。戻ってきたら確かめて、止まっていれば録音し直す
+let recording = false, lastData = 0, gaps = [], gapStart = null;
+const fmtClock = t => new Date(t).toLocaleTimeString("ja-JP", { hour:"2-digit", minute:"2-digit" });
+function watchTrack() {
+  const tr = stream?.getAudioTracks()[0]; if (!tr) return;
+  tr.onmute = () => { if (recording && !gapStart) gapStart = Date.now(); };
+  tr.onended = () => { if (recording && !gapStart) gapStart = Date.now(); };
+}
+const micDead = () => {
+  const tr = stream?.getAudioTracks()[0];
+  return !tr || tr.readyState === "ended" || tr.muted || recorder?.state !== "recording" || Date.now() - lastData > 3000;
+};
+async function resumeRec() {
+  try {
+    try { if (recorder?.state === "recording") recorder.stop(); } catch {}
+    stream?.getTracks().forEach(t => t.stop());
+    try { actx?.resume?.(); } catch {}
+    stream = await navigator.mediaDevices.getUserMedia({ audio:{ echoCancellation:true, noiseSuppression:true } });
+    watchTrack(); lastData = Date.now(); startSegment();
+    stopMeterSilently(); if (actx) startMeter(stream);
+    if (gapStart) { gaps.push({ from:gapStart, to:Date.now() }); }
+    const g = gaps[gaps.length-1];
+    gapStart = null; $("recAlert").classList.add("hidden");
+    toast(g ? `録音を再開しました（${fmtClock(g.from)}〜${fmtClock(g.to)} は録れていません）` : "録音を再開しました", 4500);
     try { wakeLock = await navigator.wakeLock?.request("screen"); } catch {}
+  } catch (e) {
+    $("recAlertText").textContent = "マイクが止まっています。下のボタンを押すと録音を再開します。";
+    $("recAlert").classList.remove("hidden");
   }
+}
+$("recResume").onclick = () => resumeRec();
+document.addEventListener("visibilitychange", async () => {
+  if (!recording) return;
+  if (document.visibilityState === "hidden") { if (!gapStart) gapStart = Date.now(); return; }
+  try { wakeLock = await navigator.wakeLock?.request("screen"); } catch {}
+  await new Promise(r => setTimeout(r, 1500));   // マイクが戻るか少し待つ
+  if (!recording) return;
+  if (micDead()) await resumeRec();
+  else gapStart = null;                          // Safariで開いていた場合などは止まらずに続いている
 });
+// 画面を開いたままでもマイクが止まることがある（電話・Siriなど）ので定期的に確かめる
+setInterval(() => {
+  if (!recording || document.visibilityState !== "visible") return;
+  if (micDead()) { if (!gapStart) gapStart = Date.now(); resumeRec(); }
+}, 5000);
 
 // ===== 音声ファイル読み込み =====
 // 長い音声（ボイスメモなど）は端末の中で5分ごとのMP3に分けてから文字起こしする
@@ -566,7 +622,10 @@ function showMeta(n) {
   const d = new Date(cur.createdAt);
   const c = cur.cost ? `\n料金：文字起こし 約${yen(cur.cost.t)}円／議事録 約${yen(cur.cost.s)}円${cur.cost.unknown?"（料金表にないモデルの分は含まず）":""}` : "";
   $("dMeta").style.whiteSpace = "pre-line";
-  $("dMeta").textContent = `${d.toLocaleString("ja-JP")}　${cur.duration?fmt(cur.duration)+"　":""}${n}ファイル　状態：${cur.status}${c}`;
+  const ft = t => new Date(t).toLocaleTimeString("ja-JP", { hour:"2-digit", minute:"2-digit" });
+  const g = (cur.gaps||[]).filter(x => x.to - x.from > 5000);
+  const gapTxt = g.length ? `\n⚠ 録音できていない時間：${g.map(x=>`${ft(x.from)}〜${ft(x.to)}`).join("、")}` : "";
+  $("dMeta").textContent = `${d.toLocaleString("ja-JP")}　${cur.duration?fmt(cur.duration)+"　":""}${n}ファイル　状態：${cur.status}${c}${gapTxt}`;
 }
 
 function paintDetailMode() {
