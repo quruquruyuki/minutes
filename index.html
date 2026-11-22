@@ -369,7 +369,7 @@ async function startRec() {
   const now = new Date();
   meeting = { id:"m"+now.getTime(), title:"", createdAt:now.toISOString(), duration:0, status:"録音中", source:"rec", mode:S.mode };
   await putMeeting(meeting);
-  recording = true; gaps = []; gapStart = null; lastData = Date.now(); watchTrack();
+  recording = true; gaps = []; gapStart = null; hiddenAt = null; lastData = Date.now(); watchTrack();
   segIdx=0; startAt=Date.now(); startSegment();
   if (actx) startMeter(stream);
   segTimer = setInterval(() => { if (recorder?.state !== "recording") return; recorder.stop(); startSegment(); }, S.seg*60*1000);
@@ -377,11 +377,13 @@ async function startRec() {
   try { wakeLock = await navigator.wakeLock?.request("screen"); } catch {}
   $("recBtn").classList.add("on");
   $("recHint").textContent = navigator.standalone
-    ? "録音中…ホーム画面から開いたアプリは、画面を消すと録音が止まります。画面を消すときはSafariで開いて録音してください"
+    ? "録音中…この開き方だと画面を消すと録音が止まります。Safariの「ホーム画面に追加」で「Webアプリとして開く」をオフにして追加し直すと、画面を消しても録音が続きます"
     : "録音中…Safariで開いているので、画面を消しても録音が続く見込みです（戻ったら確認します）";
 }
 
 async function stopRec() {
+  // 画面を戻してすぐ止めた場合：確認がまだなので、マイクの状態を見て判定する
+  if (hiddenAt) { if (trackDead() && !gapStart) gapStart = hiddenAt; hiddenAt = null; }
   recording = false; clearInterval(segTimer); clearInterval(tick); stopMeter(); $("recAlert").classList.add("hidden");
   if (recorder?.state === "recording") await new Promise(r => { const prev=recorder.onstop; recorder.onstop=async()=>{ await prev(); r(); }; recorder.stop(); });
   stream?.getTracks().forEach(t=>t.stop());
@@ -400,13 +402,17 @@ $("recBtn").onclick = () => recording ? stopRec() : startRec();
 
 // ===== 録音が止まったときの検知と再開 =====
 // iPhoneは画面を消したりアプリを切り替えるとマイクを止める。戻ってきたら確かめて、止まっていれば録音し直す
-let recording = false, lastData = 0, gaps = [], gapStart = null;
+let recording = false, lastData = 0, gaps = [], gapStart = null, hiddenAt = null;
 const fmtClock = t => new Date(t).toLocaleTimeString("ja-JP", { hour:"2-digit", minute:"2-digit" });
 function watchTrack() {
   const tr = stream?.getAudioTracks()[0]; if (!tr) return;
   tr.onmute = () => { if (recording && !gapStart) gapStart = Date.now(); };
   tr.onended = () => { if (recording && !gapStart) gapStart = Date.now(); };
+  // 一時的に止まってすぐ戻った場合は、止まっていた間だけを記録する
+  tr.onunmute = () => { if (recording && gapStart && recorder?.state === "recording") { gaps.push({ from:gapStart, to:Date.now() }); gapStart = null; } };
 }
+// マイクの状態だけで判定（録音データの届き具合は見ない）
+const trackDead = () => { const tr = stream?.getAudioTracks()[0]; return !tr || tr.readyState === "ended" || tr.muted || recorder?.state !== "recording"; };
 const micDead = () => {
   const tr = stream?.getAudioTracks()[0];
   return !tr || tr.readyState === "ended" || tr.muted || recorder?.state !== "recording" || Date.now() - lastData > 4000;
@@ -432,12 +438,12 @@ async function resumeRec() {
 $("recResume").onclick = () => resumeRec();
 document.addEventListener("visibilitychange", async () => {
   if (!recording) return;
-  if (document.visibilityState === "hidden") { if (!gapStart) gapStart = Date.now(); return; }
+  if (document.visibilityState === "hidden") { hiddenAt = hiddenAt || Date.now(); return; }
   try { wakeLock = await navigator.wakeLock?.request("screen"); } catch {}
   await new Promise(r => setTimeout(r, 3500));   // マイクが戻るか・たまった録音が届くか少し待つ
   if (!recording) return;
-  if (micDead()) await resumeRec();
-  else gapStart = null;                          // Safariで開いていた場合などは止まらずに続いている
+  if (micDead()) { if (!gapStart) gapStart = hiddenAt || Date.now(); hiddenAt = null; await resumeRec(); }
+  else hiddenAt = null;                          // Safariで開いていた場合などは止まらずに続いている
 });
 // 画面を開いたままでもマイクが止まることがある（電話・Siriなど）ので定期的に確かめる
 setInterval(() => {
