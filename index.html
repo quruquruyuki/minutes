@@ -287,7 +287,7 @@ async function deleteMeeting(id) {
 
 // ===== 設定をSupabaseに保存（Safariのデータを消しても残るように） =====
 // app="minutes" はこのアプリの設定、app="shared" は他のアプリとも共通で使う設定（ユーザー辞書）
-const PREF_KEYS = ["hint", "hintSem", "seg"];
+const PREF_KEYS = ["hint", "hintSem", "seg", "tEngine", "sEngine", "mode"];
 async function loadPrefs() {
   try {
     const { data, error } = await sb.from("user_prefs").select("app,data").in("app", ["minutes", "shared"]);
