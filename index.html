@@ -269,6 +269,7 @@ const getMeeting = id => req(tx("meetings").get(id));
 const allMeetings = () => req(tx("meetings").getAll());
 const addSegment = s => req(tx("segments","readwrite").add(s));
 const putSegment = s => req(tx("segments","readwrite").put(s));
+const delSegment = id => req(tx("segments","readwrite").delete(id));
 const getSegments = async id => (await req(tx("segments").index("meeting").getAll(id))).sort((a,b)=>a.idx-b.idx);
 async function deleteMeeting(id) {
   for (const s of await getSegments(id)) await req(tx("segments","readwrite").delete(s.id));
@@ -375,7 +376,9 @@ async function startRec() {
   tick = setInterval(() => $("timer").textContent = fmt((Date.now()-startAt)/1000), 500);
   try { wakeLock = await navigator.wakeLock?.request("screen"); } catch {}
   $("recBtn").classList.add("on");
-  $("recHint").textContent = "録音中…画面を閉じたり他のアプリに切り替えると止まることがあります";
+  $("recHint").textContent = navigator.standalone
+    ? "録音中…ホーム画面から開いたアプリは、画面を消すと録音が止まります。画面を消すときはSafariで開いて録音してください"
+    : "録音中…Safariで開いているので、画面を消しても録音が続く見込みです（戻ったら確認します）";
 }
 
 async function stopRec() {
@@ -406,7 +409,7 @@ function watchTrack() {
 }
 const micDead = () => {
   const tr = stream?.getAudioTracks()[0];
-  return !tr || tr.readyState === "ended" || tr.muted || recorder?.state !== "recording" || Date.now() - lastData > 3000;
+  return !tr || tr.readyState === "ended" || tr.muted || recorder?.state !== "recording" || Date.now() - lastData > 4000;
 };
 async function resumeRec() {
   try {
@@ -431,7 +434,7 @@ document.addEventListener("visibilitychange", async () => {
   if (!recording) return;
   if (document.visibilityState === "hidden") { if (!gapStart) gapStart = Date.now(); return; }
   try { wakeLock = await navigator.wakeLock?.request("screen"); } catch {}
-  await new Promise(r => setTimeout(r, 1500));   // マイクが戻るか少し待つ
+  await new Promise(r => setTimeout(r, 3500));   // マイクが戻るか・たまった録音が届くか少し待つ
   if (!recording) return;
   if (micDead()) await resumeRec();
   else gapStart = null;                          // Safariで開いていた場合などは止まらずに続いている
@@ -713,7 +716,27 @@ const audioSeconds = blob => new Promise(res => {
   setTimeout(()=>res(0), 5000);
 });
 
+// 画面を消している間も録れていた場合などは1つの録音が長くなるので、文字起こしの前に5分ごとに分け直す
+async function resplitLong() {
+  const segs = await getSegments(cur.id);
+  const big = segs.filter(s => s.text === null && !(s.mime||"").includes("mp3") && s.blob.size > 3.5*1024*1024);
+  if (!big.length) return;
+  try {
+    for (let b = 0; b < big.length; b++) {
+      const s = big[b];
+      const parts = await splitMp4(new File([s.blob], "rec.m4a", { type: s.mime || "audio/mp4" }),
+        p => busyShow("長い録音を分けています", p, `${b+1}／${big.length}　${Math.round(p*100)}%`));
+      if (!parts?.length) continue;
+      for (let k = 0; k < parts.length; k++)
+        await addSegment({ meetingId:cur.id, idx:s.idx + k/1000, blob:parts[k].blob, mime:"audio/mp3", text:null, name:`part${k+1}.mp3` });
+      await delSegment(s.id);
+    }
+  } catch (e) { /* 分けられなければそのまま送る */ }
+  busyHide();
+}
+
 async function transcribeAll(force) {
+  await resplitLong();
   const segs = await getSegments(cur.id);
   if (force) for (const s of segs) { s.text=null; await putSegment(s); }
   let done = segs.filter(s=>s.text!==null).length;
