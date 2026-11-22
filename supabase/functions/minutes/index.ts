@@ -211,10 +211,27 @@ const SEMINAR_PROMPT = `以下は製品や疾患に関するセミナー・講�
   "tips": ["医師との面談で話題にできそうなポイント"]
 }`;
 
+const DEAL_PROMPT = `以下は商談・提案・見積もり説明など、相手から説明を受けた場面の文字起こしです。説明を受けた側（自分）があとで見返して、検討や他社との比較に使えるノートを日本語で作ってください。
+文字起こしには聞き間違いが含まれることがあるので、文脈から自然な言葉に直してください。
+金額・数量・面積・期限・条件などは、話された内容をそのまま正確に残し、話されていないことは推測で足さないでください。
+次のJSONだけを出力してください（前後に説明文やコードブロックを付けない）:
+{
+  "title": "相手と内容が分かる短いタイトル",
+  "counterpart": "相手の会社名・担当者（分かる範囲。不明なら空）",
+  "summary": "3〜5文の要約",
+  "proposal": [{"heading": "提案・説明の項目", "points": ["内容"]}],
+  "money": ["金額・見積もり・値引き・支払い・期限などの条件（1項目ずつ）"],
+  "pros": ["良いと感じられる点・相手が強調した強み"],
+  "cons": ["気になる点・リスク・注意点"],
+  "qa": [{"q": "質問", "a": "回答"}],
+  "todos": [{"task": "自分が確認・検討すること、相手からの宿題", "owner": "担当（自分・相手など。不明なら空）", "due": "期限（不明なら空）"}]
+}`;
+
 async function summarize(body: any) {
   const { transcript, engine = "claude", model = "", memo = "", mode = "meeting", quality = "standard" } = body;
   if (!transcript) throw new Error("文字起こしが空です");
-  const user = `${mode === "seminar" ? SEMINAR_PROMPT : SUMMARY_PROMPT}${memo ? `\n\n補足メモ: ${memo}` : ""}\n\n--- 文字起こし ---\n${transcript}`;
+  const prompt = mode === "seminar" ? SEMINAR_PROMPT : mode === "deal" ? DEAL_PROMPT : SUMMARY_PROMPT;
+  const user = `${prompt}${memo ? `\n\n補足メモ: ${memo}` : ""}\n\n--- 文字起こし ---\n${transcript}`;
   let raw = "";
   let usd: number | null = null;
   const sm = model || (engine === "gemini"
@@ -293,19 +310,31 @@ async function notion(path: string, method: string, body: unknown) {
   return d;
 }
 
+// ページを作り、100ブロックを超える分は後から足す
+async function createPage(dataSourceId: string, properties: any, blocks: any[]) {
+  const page = await notion("pages", "POST", {
+    parent: { type: "data_source_id", data_source_id: dataSourceId },
+    properties,
+    children: blocks.slice(0, 100),
+  });
+  for (let i = 100; i < blocks.length; i += 100) {
+    await notion(`blocks/${page.id}/children`, "PATCH", { children: blocks.slice(i, i + 100) });
+  }
+  return { url: page.url };
+}
+const todoBlocks = (todos: any[]) => todos.map((t) => {
+  const extra = [t.owner && `担当: ${t.owner}`, t.due && `期限: ${t.due}`].filter(Boolean).join(" / ");
+  return todo(extra ? `${t.task}（${extra}）` : t.task);
+});
+const topicBlocks = (topics: any[], fallback: string) => topics.flatMap((t) => [h3(t.heading || fallback), ...(t.points ?? []).map(li)]);
+
 async function saveSeminar(body: any) {
   const { result: x, transcript = "", date, duration = "" } = body;
   const blocks: any[] = [];
   const meta = [x.speaker && `演者: ${x.speaker}`, duration && `録音時間: ${duration}`].filter(Boolean).join("　");
   if (meta) blocks.push(para(meta));
   blocks.push(h2("要約"), ...chunk(x.summary || "-").map(para));
-  if (x.topics?.length) {
-    blocks.push(h2("要点"));
-    for (const t of x.topics) {
-      blocks.push(h3(t.heading || "要点"));
-      for (const p of t.points ?? []) blocks.push(li(p));
-    }
-  }
+  if (x.topics?.length) blocks.push(h2("要点"), ...topicBlocks(x.topics, "要点"));
   if (x.data?.length) blocks.push(h2("データ・エビデンス"), ...x.data.map(li));
   if (x.qa?.length) {
     blocks.push(h2("質疑応答"));
@@ -315,57 +344,52 @@ async function saveSeminar(body: any) {
   if (transcript) blocks.push(h2("文字起こし全文"), ...chunk(transcript).map(para));
 
   const kw = [...new Set((x.keywords ?? []).map((k: string) => String(k).replace(/,/g, " ").trim().slice(0, 90)).filter(Boolean))].slice(0, 10);
-  const page = await notion("pages", "POST", {
-    parent: { type: "data_source_id", data_source_id: SEMINAR_DS() },
-    properties: {
-      "名前": { title: rt(x.title || "セミナーノート") },
-      "日付": { date: { start: date || new Date().toISOString().slice(0, 10) } },
-      "演者": { rich_text: rt((x.speaker || "").slice(0, 1900)) },
-      "キーワード": { multi_select: kw.map((name) => ({ name })) },
-    },
-    children: blocks.slice(0, 100),
-  });
-  for (let i = 100; i < blocks.length; i += 100) {
-    await notion(`blocks/${page.id}/children`, "PATCH", { children: blocks.slice(i, i + 100) });
+  return createPage(SEMINAR_DS(), {
+    "名前": { title: rt(x.title || "セミナーノート") },
+    "日付": { date: { start: date || new Date().toISOString().slice(0, 10) } },
+    "演者": { rich_text: rt((x.speaker || "").slice(0, 1900)) },
+    "キーワード": { multi_select: kw.map((name) => ({ name })) },
+  }, blocks);
+}
+
+// 商談：議事録と同じデータベースに、商談向けの項目で保存する
+async function saveDeal(body: any) {
+  const { result: x, transcript = "", date, duration = "" } = body;
+  const blocks: any[] = [];
+  const meta = ["ジャンル: 商談", x.counterpart && `相手: ${x.counterpart}`, duration && `録音時間: ${duration}`].filter(Boolean).join("　");
+  blocks.push(para(meta));
+  blocks.push(h2("要約"), ...chunk(x.summary || "-").map(para));
+  if (x.proposal?.length) blocks.push(h2("提案・説明の内容"), ...topicBlocks(x.proposal, "項目"));
+  if (x.money?.length) blocks.push(h2("金額・条件"), ...x.money.map(li));
+  if (x.pros?.length) blocks.push(h2("良い点"), ...x.pros.map(li));
+  if (x.cons?.length) blocks.push(h2("気になる点"), ...x.cons.map(li));
+  if (x.qa?.length) {
+    blocks.push(h2("質疑応答"));
+    for (const q of x.qa) blocks.push(li(`Q. ${q.q}`), para(`A. ${q.a}`));
   }
-  return { url: page.url };
+  if (x.todos?.length) blocks.push(h2("確認・検討すること"), ...todoBlocks(x.todos));
+  if (transcript) blocks.push(h2("文字起こし全文"), ...chunk(transcript).map(para));
+  return createPage(MINUTES_DS(), {
+    "名前": { title: rt(x.title || "商談") },
+    "日付": { date: { start: date || new Date().toISOString().slice(0, 10) } },
+  }, blocks);
 }
 
 async function saveToNotion(body: any) {
   if (body.mode === "seminar") return saveSeminar(body);
+  if (body.mode === "deal") return saveDeal(body);
   const { result: x, transcript = "", date, duration = "" } = body;
   const blocks: any[] = [];
   const meta = [`ジャンル: ${x.genre || "-"}`, duration && `録音時間: ${duration}`].filter(Boolean).join("　");
   blocks.push(para(meta));
   blocks.push(h2("要約"), ...chunk(x.summary || "-").map(para));
   if (x.participants?.length) blocks.push(h2("参加者"), para(x.participants.join("、")));
-  if (x.topics?.length) {
-    blocks.push(h2("議題と要点"));
-    for (const t of x.topics) {
-      blocks.push(h3(t.heading || "議題"));
-      for (const p of t.points ?? []) blocks.push(li(p));
-    }
-  }
+  if (x.topics?.length) blocks.push(h2("議題と要点"), ...topicBlocks(x.topics, "議題"));
   if (x.decisions?.length) blocks.push(h2("決定事項"), ...x.decisions.map(li));
-  if (x.todos?.length) {
-    blocks.push(h2("ToDo"));
-    for (const t of x.todos) {
-      const extra = [t.owner && `担当: ${t.owner}`, t.due && `期限: ${t.due}`].filter(Boolean).join(" / ");
-      blocks.push(todo(extra ? `${t.task}（${extra}）` : t.task));
-    }
-  }
+  if (x.todos?.length) blocks.push(h2("ToDo"), ...todoBlocks(x.todos));
   if (transcript) blocks.push(h2("文字起こし全文"), ...chunk(transcript).map(para));
-
-  const page = await notion("pages", "POST", {
-    parent: { type: "data_source_id", data_source_id: MINUTES_DS() },
-    properties: {
-      "名前": { title: rt(x.title || "議事録") },
-      "日付": { date: { start: date || new Date().toISOString().slice(0, 10) } },
-    },
-    children: blocks.slice(0, 100),
-  });
-  for (let i = 100; i < blocks.length; i += 100) {
-    await notion(`blocks/${page.id}/children`, "PATCH", { children: blocks.slice(i, i + 100) });
-  }
-  return { url: page.url };
+  return createPage(MINUTES_DS(), {
+    "名前": { title: rt(x.title || "議事録") },
+    "日付": { date: { start: date || new Date().toISOString().slice(0, 10) } },
+  }, blocks);
 }
