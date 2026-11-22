@@ -302,10 +302,30 @@ const req = r => new Promise((res, rej) => { r.onsuccess=()=>res(r.result); r.on
 const putMeeting = m => req(tx("meetings","readwrite").put(m));
 const getMeeting = id => req(tx("meetings").get(id));
 const allMeetings = () => req(tx("meetings").getAll());
-const addSegment = s => req(tx("segments","readwrite").add(s));
-const putSegment = s => req(tx("segments","readwrite").put(s));
+// 音声はBlobのままではなく中身（ArrayBuffer）で保存する。
+// SafariはIndexedDBに入れたBlobが、Safariを閉じて開き直すと読めなくなる不具合があるため
+async function packSeg(s) {
+  const o = { ...s };
+  if (o.blob) { o.buf = await o.blob.arrayBuffer(); o.size = o.blob.size; o.mime = o.mime || o.blob.type; delete o.blob; }
+  return o;
+}
+function unpackSeg(r) {
+  if (r.buf) r.blob = new Blob([r.buf], { type: r.mime || "audio/mp4" });
+  return r;
+}
+const addSegment = async s => { const o = await packSeg(s); return req(tx("segments","readwrite").add(o)); };
+const putSegment = async s => { const o = await packSeg(s); return req(tx("segments","readwrite").put(o)); };
 const delSegment = id => req(tx("segments","readwrite").delete(id));
-const getSegments = async id => (await req(tx("segments").index("meeting").getAll(id))).sort((a,b)=>a.idx-b.idx);
+const getSegments = async id => (await req(tx("segments").index("meeting").getAll(id))).map(unpackSeg).sort((a,b)=>a.idx-b.idx);
+// 以前の形（Blob）で保存した音声を、読めるうちに新しい形へ移す。読めなかったものには印を付ける
+async function migrateSegments() {
+  const all = await req(tx("segments").getAll());
+  for (const r of all) {
+    if (r.buf || !r.blob || r.broken) continue;
+    try { const buf = await r.blob.arrayBuffer(); const o = { ...r, buf, size:r.blob.size, mime:r.mime || r.blob.type }; delete o.blob; await req(tx("segments","readwrite").put(o)); }
+    catch { const o = { ...r, broken:true, size:r.blob?.size || 0 }; delete o.blob; await req(tx("segments","readwrite").put(o)); }
+  }
+}
 async function deleteMeeting(id) {
   for (const s of await getSegments(id)) await req(tx("segments","readwrite").delete(s.id));
   await req(tx("meetings","readwrite").delete(id));
@@ -701,6 +721,10 @@ async function openDetail(id) {
   $("dAudio").innerHTML = "";
   segs.forEach((s,i) => {
     const w = document.createElement("div"); w.className="seg";
+    if (!s.blob) {   // Safariの不具合で読めなくなった音声
+      w.innerHTML = `<div>${i+1}／${segs.length}　<span style="color:#e03e3e">この音声は読み込めなくなっています</span>${s.text?"（文字起こしは残っています）":""}</div>`;
+      $("dAudio").appendChild(w); return;
+    }
     const url = URL.createObjectURL(s.blob);
     const ext = (s.mime||"").includes("webm") ? "webm" : (s.mime||"").includes("mp3") || (s.mime||"").includes("mpeg") ? "mp3" : (s.name?.split(".").pop() || "m4a");
     // 保存するファイル名：日付_タイトル_番号（ファイル名に使えない記号は除く）
@@ -860,7 +884,7 @@ const audioSeconds = blob => new Promise(res => {
 // 画面を消している間も録れていた場合などは1つの録音が長くなるので、文字起こしの前に5分ごとに分け直す
 async function resplitLong() {
   const segs = await getSegments(cur.id);
-  const big = segs.filter(s => s.text === null && !(s.mime||"").includes("mp3") && s.blob.size > 3.5*1024*1024);
+  const big = segs.filter(s => s.text === null && s.blob && !(s.mime||"").includes("mp3") && s.blob.size > 3.5*1024*1024);
   if (!big.length) return;
   try {
     for (let b = 0; b < big.length; b++) {
@@ -883,6 +907,7 @@ async function transcribeAll(force) {
   let done = segs.filter(s=>s.text!==null).length;
   for (const s of segs) {
     if (s.text !== null) continue;
+    if (!s.blob) { s.text = ""; await putSegment(s); done++; continue; }   // 読めなくなった音声は飛ばす
     setProg(done/(segs.length+1), `文字起こし中… ${done+1}／${segs.length}`);
     const fd = new FormData();
     const ext = (s.mime||"").includes("webm")?"webm":(s.name?.split(".").pop()||"m4a");
@@ -969,6 +994,7 @@ $("sLogout").onclick = async () => { await sb.auth.signOut(); $("settings").clos
 dbReady.then(async () => {
   // 録音中に閉じてしまった記録は「未処理」に戻す
   for (const m of await allMeetings()) if (m.status==="録音中") { m.status="未処理"; await putMeeting(m); }
+  try { await migrateSegments(); } catch (e) {}
   renderList();
   if (navigator.storage?.persist) navigator.storage.persist();
   const t = await token(); show(t ? "home" : "login"); if (t) { loadRate(); loadPrefs(); }
