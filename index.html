@@ -136,7 +136,7 @@
 
     <div id="resultArea" class="hidden">
       <label>タイトル</label><input id="rTitle">
-      <label>日付</label><input id="rDate" type="date">
+      <label>日時</label><input id="rDate" type="datetime-local">
       <div id="meetFields">
       <label>ジャンル</label><input id="rGenre">
       <label>要約</label><textarea id="rSummary"></textarea>
@@ -666,7 +666,7 @@ async function importOne(f, k, n) {
   // 録音した日（ファイルの日時）を議事録の日付にする
   const rec = f.lastModified ? new Date(f.lastModified) : now;
   const recDate = `${rec.getFullYear()}-${String(rec.getMonth()+1).padStart(2,"0")}-${String(rec.getDate()).padStart(2,"0")}`;
-  const m = { id:"m"+now.getTime()+"-"+k, title:f.name.replace(/\.[^.]+$/,""), createdAt:now.toISOString(), date:recDate, status:"未処理", mode:S.mode,
+  const m = { id:"m"+now.getTime()+"-"+k, title:f.name.replace(/\.[^.]+$/,""), createdAt:now.toISOString(), date:recDate, recAt:rec.toISOString(), status:"未処理", mode:S.mode,
     source: parts ? "import-split" : "import", duration: parts ? parts.reduce((a,p)=>a+p.seconds,0) : 0 };
   await putMeeting(m);
   if (parts) { for (let i=0;i<parts.length;i++) await addSegment({ meetingId:m.id, idx:i, blob:parts[i].blob, mime:"audio/mp3", text:null, name:`part${i+1}.mp3` }); }
@@ -689,9 +689,17 @@ $("importFile").onchange = async e => {
   else if (ids.length > 1) toast(`${ids.length}件を読み込みました。一覧から1件ずつ処理してください`, 3500);
 };
 
+// ===== 日時 =====
+// 録音した日時（読み込んだ音声はファイルの日時）を「YYYY-MM-DDTHH:MM」で返す
+const localDT = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}T${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`;
+const recDT = m => m.dateTime || (m.date && !m.recAt ? `${m.date}T${localDT(new Date(m.createdAt)).slice(11)}` : localDT(new Date(m.recAt || m.createdAt)));
+// Notionに渡す形（日本時間の時差付き）
+const tzOffset = () => { const o = -new Date().getTimezoneOffset(); return `${o>=0?"+":"-"}${String(Math.floor(Math.abs(o)/60)).padStart(2,"0")}:${String(Math.abs(o)%60).padStart(2,"0")}`; };
+const notionDate = v => v.length === 16 ? `${v}:00${tzOffset()}` : v;
+
 // ===== 音声ファイルの名前 =====
 const segExt = s => (s.mime||"").includes("webm") ? "webm" : (s.mime||"").includes("mp3") || (s.mime||"").includes("mpeg") ? "mp3" : (s.name?.split(".").pop() || "m4a");
-const segBase = () => `${(cur.date || cur.createdAt.slice(0,10))}_${(cur.result?.title || cur.title || "録音").replace(/[\\/:*?"<>|\s]+/g, "_").slice(0, 40)}`;
+const segBase = () => `${recDT(cur).slice(0,10)}_${(cur.result?.title || cur.title || "録音").replace(/[\\/:*?"<>|\s]+/g, "_").slice(0, 40)}`;
 // 番号は桁をそろえる（ファイルアプリで並べたときに順番どおりになるように）
 // 例：…_03／10.m4a（全部で何個のうちの何個目か。「／」はファイル名に使える全角の斜線）
 const segName = (i, n, s) => `${segBase()}_${String(i+1).padStart(String(n).length, "0")}／${n}.${segExt(s)}`;
@@ -829,7 +837,7 @@ async function openDetail(id) {
     const url = URL.createObjectURL(s.blob);
     const ext = (s.mime||"").includes("webm") ? "webm" : (s.mime||"").includes("mp3") || (s.mime||"").includes("mpeg") ? "mp3" : (s.name?.split(".").pop() || "m4a");
     // 保存するファイル名：日付_タイトル_番号（ファイル名に使えない記号は除く）
-    const base = `${(cur.date || cur.createdAt.slice(0,10))}_${(cur.result?.title || cur.title || "録音").replace(/[\\/:*?"<>|\s]+/g, "_").slice(0, 40)}`;
+    const base = `${recDT(cur).slice(0,10)}_${(cur.result?.title || cur.title || "録音").replace(/[\\/:*?"<>|\s]+/g, "_").slice(0, 40)}`;
     w.innerHTML = `<div style="display:flex;justify-content:space-between"><span>${i+1}／${segs.length}（${(s.blob.size/1024/1024).toFixed(1)}MB）${s.text?"・文字起こし済み":""}</span><a href="#" class="saveAudio">保存</a></div><audio controls preload="none" src="${url}"></audio>`;
     // 共有メニューを開く（「"ファイル"に保存」で好きなフォルダを選べる）。使えない環境ではダウンロードする
     w.querySelector(".saveAudio").onclick = async ev => {
@@ -878,7 +886,7 @@ $("dMode").onchange = async () => {
 
 function fillResult(r) {
   $("resultArea").classList.toggle("hidden", !r); if (!r) return;
-  $("rTitle").value = r.title||""; $("rDate").value = cur.date || cur.createdAt.slice(0,10);
+  $("rTitle").value = r.title||""; $("rDate").value = recDT(cur);
   if (modeOf(cur)==="seminar") {
     $("zSpeaker").value = r.speaker||""; $("zKeywords").value = (r.keywords||[]).join("、"); $("zSummary").value = r.summary||"";
     $("zTopics").value = (r.topics||[]).map(t=>`## ${t.heading}\n`+(t.points||[]).map(p=>`- ${p}`).join("\n")).join("\n\n");
@@ -904,7 +912,7 @@ function fillResult(r) {
     return;
   }
   $("rGenre").value = r.genre||""; $("rSummary").value = r.summary||"";
-  $("rDate").value = cur.date || cur.createdAt.slice(0,10);
+  $("rDate").value = recDT(cur);
   $("rPeople").value = (r.participants||[]).join("、");
   $("rTopics").value = (r.topics||[]).map(t=>`## ${t.heading}\n`+(t.points||[]).map(p=>`- ${p}`).join("\n")).join("\n\n");
   $("rDecisions").value = (r.decisions||[]).join("\n");
@@ -1057,8 +1065,8 @@ $("saveBtn").onclick = async () => {
   if (pageId && !confirm("Notionの同じページを、今の内容で上書きします。よろしいですか？（音声はそのまま残ります）")) return;
   busy(true); $("saveBtn").textContent="保存中…";
   try {
-    cur.result = readResult(); cur.date = $("rDate").value; cur.transcript = $("dTranscript").value.trim();
-    const d = await api({ action:"save", pageId, mode:modeOf(cur), result:cur.result, transcript:cur.transcript, date:cur.date, duration:cur.duration?fmt(cur.duration):"" });
+    cur.result = readResult(); cur.dateTime = $("rDate").value || recDT(cur); cur.date = cur.dateTime.slice(0,10); cur.transcript = $("dTranscript").value.trim();
+    const d = await api({ action:"save", pageId, mode:modeOf(cur), result:cur.result, transcript:cur.transcript, date:notionDate(cur.dateTime), duration:cur.duration?fmt(cur.duration):"" });
     cur.notionUrl = d.url; cur.notionPageId = d.id; cur.status="保存済み"; await putMeeting(cur);
     $("notionLink").innerHTML = `<a href="${d.url}" target="_blank">Notionで開く</a>`; toast("Notionに保存しました");
   } catch (e) { toast("保存できませんでした："+e.message, 4000); }
