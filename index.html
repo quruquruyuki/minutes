@@ -187,7 +187,7 @@
     <div style="display:flex;justify-content:space-between;align-items:center"><h2>文字起こし</h2><button id="dictApply" style="margin-top:14px">辞書で直す</button></div>
     <textarea id="dTranscript" style="min-height:200px" placeholder="まだ文字起こししていません"></textarea>
 
-    <h2>音声（この端末に保存）</h2>
+    <div style="display:flex;justify-content:space-between;align-items:center"><h2>音声（この端末に保存）</h2><button id="saveAllAudio" style="margin-top:14px">まとめて保存</button></div>
     <div id="dAudio"></div>
   </main>
 </section>
@@ -684,6 +684,28 @@ $("importFile").onchange = async e => {
   else if (ids.length > 1) toast(`${ids.length}件を読み込みました。一覧から1件ずつ処理してください`, 3500);
 };
 
+// ===== 音声ファイルの名前 =====
+const segExt = s => (s.mime||"").includes("webm") ? "webm" : (s.mime||"").includes("mp3") || (s.mime||"").includes("mpeg") ? "mp3" : (s.name?.split(".").pop() || "m4a");
+const segBase = () => `${(cur.date || cur.createdAt.slice(0,10))}_${(cur.result?.title || cur.title || "録音").replace(/[\\/:*?"<>|\s]+/g, "_").slice(0, 40)}`;
+// 番号は桁をそろえる（ファイルアプリで並べたときに順番どおりになるように）
+const segName = (i, n, s) => `${segBase()}_${String(i+1).padStart(String(n).length, "0")}.${segExt(s)}`;
+
+// 音声をまとめて共有メニューに渡す（「"ファイル"に保存」で1つのフォルダに一括保存できる）
+$("saveAllAudio").onclick = async () => {
+  const segs = (await getSegments(cur.id)).filter(s => s.blob);
+  if (!segs.length) return toast("保存できる音声がありません");
+  const files = segs.map((s, i) => new File([s.blob], segName(i, segs.length, s), { type: s.blob.type || s.mime || "audio/mp4" }));
+  if (navigator.canShare?.({ files })) {
+    try { await navigator.share({ files, title: segBase() }); return; }
+    catch (e) { if (e.name === "AbortError") return; }
+  }
+  // 共有メニューが使えないときは1つずつダウンロードする
+  for (const f of files) {
+    const u = URL.createObjectURL(f); const a = document.createElement("a"); a.href = u; a.download = f.name;
+    document.body.appendChild(a); a.click(); a.remove(); await new Promise(r => setTimeout(r, 400));
+  }
+};
+
 // ===== 一覧 =====
 async function renderList() {
   const ms = (await allMeetings()).filter(m=>m.status!=="録音中" || m.id===meeting?.id).sort((a,b)=>b.createdAt.localeCompare(a.createdAt));
@@ -733,7 +755,7 @@ async function openDetail(id) {
     // 共有メニューを開く（「"ファイル"に保存」で好きなフォルダを選べる）。使えない環境ではダウンロードする
     w.querySelector(".saveAudio").onclick = async ev => {
       ev.preventDefault();
-      const name = `${base}_${i+1}.${ext}`;
+      const name = segName(i, segs.length, s);
       const file = new File([s.blob], name, { type: s.blob.type || s.mime || "audio/mp4" });
       if (navigator.canShare?.({ files:[file] })) {
         try { await navigator.share({ files:[file], title:name }); return; }
