@@ -693,7 +693,8 @@ $("importFile").onchange = async e => {
 const segExt = s => (s.mime||"").includes("webm") ? "webm" : (s.mime||"").includes("mp3") || (s.mime||"").includes("mpeg") ? "mp3" : (s.name?.split(".").pop() || "m4a");
 const segBase = () => `${(cur.date || cur.createdAt.slice(0,10))}_${(cur.result?.title || cur.title || "録音").replace(/[\\/:*?"<>|\s]+/g, "_").slice(0, 40)}`;
 // 番号は桁をそろえる（ファイルアプリで並べたときに順番どおりになるように）
-const segName = (i, n, s) => `${segBase()}_${String(i+1).padStart(String(n).length, "0")}.${segExt(s)}`;
+// 例：…_03／10.m4a（全部で何個のうちの何個目か。「／」はファイル名に使える全角の斜線）
+const segName = (i, n, s) => `${segBase()}_${String(i+1).padStart(String(n).length, "0")}／${n}.${segExt(s)}`;
 
 // 音声をまとめて共有メニューに渡す（「"ファイル"に保存」で1つのフォルダに一括保存できる）
 // 録音を1つのMP3にまとめる（話し声向けの16kHz・モノラル。90分で約20MB）
