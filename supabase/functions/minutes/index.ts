@@ -94,6 +94,7 @@ Deno.serve(async (req) => {
     const ct = req.headers.get("content-type") ?? "";
     if (ct.includes("multipart/form-data")) {
       const form = await req.formData();
+      if (form.get("action") === "attach") return json(await attachAudio(form));
       if (form.get("action") !== "transcribe") return json({ error: "不明な処理" }, 400);
       return json(await transcribe(form));
     }
@@ -338,7 +339,32 @@ async function createPage(dataSourceId: string, properties: any, blocks: any[]) 
   for (let i = 100; i < blocks.length; i += 100) {
     await notion(`blocks/${page.id}/children`, "PATCH", { children: blocks.slice(i, i + 100) });
   }
-  return { url: page.url };
+  return { url: page.url, id: page.id };
+}
+
+// 保存済みのNotionページに音声ファイルを添付する（Notionの無料プランは1ファイル5MBまで）
+async function attachAudio(form: FormData) {
+  const file = form.get("file") as File;
+  const pageId = String(form.get("page") ?? "").replace(/-/g, "");
+  if (!file || !/^[0-9a-f]{32}$/i.test(pageId)) throw new Error("添付先のページか音声がありません");
+  if (file.size > 5 * 1024 * 1024) throw new Error("5MBを超える音声はNotionに添付できません");
+  const ext = (file.name.split(".").pop() || "").toLowerCase();
+  const type = ext === "mp3" ? "audio/mpeg" : ext === "m4a" || ext === "mp4" ? "audio/mp4" : ext === "webm" ? "audio/webm" : (file.type || "audio/mp4");
+  const up = await notion("file_uploads", "POST", { mode: "single_part", filename: file.name, content_type: type });
+  const fd = new FormData();
+  fd.append("file", new File([await file.arrayBuffer()], file.name, { type }));
+  const r = await fetch(`https://api.notion.com/v1/file_uploads/${up.id}/send`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${env("NOTION_API_KEY", "NOTION_TOKEN")}`, "Notion-Version": "2025-09-03" },
+    body: fd,
+  });
+  const d = await r.json();
+  if (!r.ok) throw new Error(`Notion: ${d.message ?? r.status}`);
+  const blocks: any[] = [];
+  if (form.get("heading") === "1") blocks.push(h2("音声"));
+  blocks.push({ object: "block", type: "audio", audio: { type: "file_upload", file_upload: { id: up.id } } });
+  await notion(`blocks/${pageId}/children`, "PATCH", { children: blocks });
+  return { ok: true };
 }
 const todoBlocks = (todos: any[]) => todos.map((t) => {
   const extra = [t.owner && `担当: ${t.owner}`, t.due && `期限: ${t.due}`].filter(Boolean).join(" / ");

@@ -187,7 +187,12 @@
     <div style="display:flex;justify-content:space-between;align-items:center"><h2>文字起こし</h2><button id="dictApply" style="margin-top:14px">辞書で直す</button></div>
     <textarea id="dTranscript" style="min-height:200px" placeholder="まだ文字起こししていません"></textarea>
 
-    <div style="display:flex;justify-content:space-between;align-items:center"><h2>音声（この端末に保存）</h2><button id="saveAllAudio" style="margin-top:14px">まとめて保存</button></div>
+    <div style="display:flex;justify-content:space-between;align-items:center"><h2>音声（この端末に保存）</h2></div>
+    <div class="row" style="justify-content:flex-start;margin-top:0">
+      <button id="saveAllAudio">1つのファイルにまとめて保存</button>
+      <button id="attachNotion">Notionに音声を添付</button>
+    </div>
+    <div class="hint" id="audioHint" style="margin-top:6px"></div>
     <div id="dAudio"></div>
   </main>
 </section>
@@ -691,19 +696,89 @@ const segBase = () => `${(cur.date || cur.createdAt.slice(0,10))}_${(cur.result?
 const segName = (i, n, s) => `${segBase()}_${String(i+1).padStart(String(n).length, "0")}.${segExt(s)}`;
 
 // 音声をまとめて共有メニューに渡す（「"ファイル"に保存」で1つのフォルダに一括保存できる）
-$("saveAllAudio").onclick = async () => {
-  const segs = (await getSegments(cur.id)).filter(s => s.blob);
-  if (!segs.length) return toast("保存できる音声がありません");
-  const files = segs.map((s, i) => new File([s.blob], segName(i, segs.length, s), { type: s.blob.type || s.mime || "audio/mp4" }));
-  if (navigator.canShare?.({ files })) {
-    try { await navigator.share({ files, title: segBase() }); return; }
-    catch (e) { if (e.name === "AbortError") return; }
+// 録音を1つのMP3にまとめる（話し声向けの16kHz・モノラル。90分で約20MB）
+async function combineToMp3(segs, onP) {
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  const ctx = new Ctx({ sampleRate: OUT_RATE });
+  const enc = new lamejs.Mp3Encoder(1, OUT_RATE, 32);
+  const out = []; const buf = new Int16Array(11520); let bi = 0;
+  const flush = () => { if (!bi) return; const o = enc.encodeBuffer(buf.subarray(0, bi)); if (o.length) out.push(new Uint8Array(o)); bi = 0; };
+  const push = x => { buf[bi++] = Math.max(-32768, Math.min(32767, Math.round(x*32767))); if (bi === buf.length) flush(); };
+  for (let k = 0; k < segs.length; k++) {
+    const ab = await ctx.decodeAudioData(await segs[k].blob.arrayBuffer());
+    const resample = makeResampler(ab.sampleRate, push);
+    const chs = Array.from({ length: ab.numberOfChannels }, (_, c) => ab.getChannelData(c));
+    for (let i = 0; i < ab.length; i++) {
+      let v = 0; for (const c of chs) v += c[i]; resample(v / chs.length);
+      if (i % (OUT_RATE*20) === 0) { onP((k + i/ab.length) / segs.length); await yieldUI(); }
+    }
   }
-  // 共有メニューが使えないときは1つずつダウンロードする
+  flush(); const o = enc.flush(); if (o.length) out.push(new Uint8Array(o));
+  ctx.close?.();
+  return new Blob(out, { type: "audio/mpeg" });
+}
+
+// 共有メニューは「タップした直後」しか開けないので、変換に時間がかかったときは2回目のタップで開く
+let combined = null;   // { id, file }
+async function shareFiles(files, title) {
+  if (navigator.canShare?.({ files })) {
+    try { await navigator.share({ files, title }); return true; }
+    catch (e) { if (e.name === "AbortError") return true; if (e.name !== "NotAllowedError") throw e; return false; }
+  }
   for (const f of files) {
     const u = URL.createObjectURL(f); const a = document.createElement("a"); a.href = u; a.download = f.name;
     document.body.appendChild(a); a.click(); a.remove(); await new Promise(r => setTimeout(r, 400));
   }
+  return true;
+}
+$("saveAllAudio").onclick = async () => {
+  if (combined?.id === cur.id) {
+    if (!(await shareFiles([combined.file], combined.file.name))) toast("もう一度押してください");
+    return;
+  }
+  const segs = (await getSegments(cur.id)).filter(s => s.blob);
+  if (!segs.length) return toast("保存できる音声がありません");
+  const name = `${segBase()}.mp3`;
+  let blob;
+  const t0 = Date.now();
+  if (segs.every(s => segExt(s) === "mp3")) {
+    blob = new Blob(segs.map(s => s.blob), { type: "audio/mpeg" });   // MP3同士はそのままつなげられる
+  } else {
+    let lock = null; try { lock = await navigator.wakeLock?.request("screen"); } catch {}
+    try { blob = await combineToMp3(segs, p => busyShow("1つのファイルにまとめています", p, `${Math.round(p*100)}%`)); }
+    catch (e) { busyHide(); try { await lock?.release(); } catch {} return toast("まとめられませんでした：" + e.message, 4000); }
+    busyHide(); try { await lock?.release(); } catch {}
+  }
+  combined = { id: cur.id, file: new File([blob], name, { type: "audio/mpeg" }) };
+  const label = `保存する（1ファイル・${(blob.size/1024/1024).toFixed(1)}MB）`;
+  if (Date.now() - t0 < 800 && await shareFiles([combined.file], name)) { $("saveAllAudio").textContent = label; return; }
+  $("saveAllAudio").textContent = label;
+  toast("準備ができました。もう一度ボタンを押して保存先を選んでください", 4000);
+};
+
+// 保存済みのNotionページに、5分ごとの音声を1つずつ添付する（無料プランの1ファイル5MBに収まる）
+$("attachNotion").onclick = async () => {
+  const pageId = cur.notionPageId || (cur.notionUrl || "").match(/([0-9a-f]{32})(?:[?#]|$)/i)?.[1];
+  if (!pageId) return toast("先に「Notionに保存」を押してください", 3500);
+  if (cur.notionAudio && !confirm("この記録の音声は添付済みです。もう一度添付しますか？")) return;
+  const segs = (await getSegments(cur.id)).filter(s => s.blob);
+  if (!segs.length) return toast("添付できる音声がありません");
+  const big = segs.filter(s => s.blob.size > 5*1024*1024);
+  if (big.length) return toast(`5MBを超える音声が${big.length}件あるため添付できません`, 4000);
+  busy(true);
+  let ok = 0;
+  try {
+    for (let i = 0; i < segs.length; i++) {
+      busyShow("Notionに音声を添付しています", i/segs.length, `${i+1}／${segs.length}`);
+      const s = segs[i], fd = new FormData();
+      fd.append("action", "attach"); fd.append("page", pageId); if (i === 0) fd.append("heading", "1");
+      fd.append("file", new File([s.blob], segName(i, segs.length, s), { type: s.blob.type || s.mime || "audio/mp4" }));
+      await api(fd, true); ok++;
+    }
+    cur.notionAudio = true; await putMeeting(cur);
+    toast(`Notionに音声を${ok}件添付しました`);
+  } catch (e) { toast(`${ok}件まで添付しました。エラー：${e.message}`, 5000); }
+  busyHide(); busy(false);
 };
 
 // ===== 一覧 =====
@@ -731,7 +806,9 @@ const show = id => { for (const s of ["login","home","detail"]) $(s).classList.t
 $("back").onclick = () => { show("home"); renderList(); };
 
 async function openDetail(id) {
-  cur = await getMeeting(id); const segs = await getSegments(id);
+  cur = await getMeeting(id);
+  if (combined?.id !== id) { combined = null; $("saveAllAudio").textContent = "1つのファイルにまとめて保存"; }
+  $("audioHint").textContent = "スマホ：1つのMP3にまとめて「ファイル」へ保存／Notion：5分ごとの音声をそのまま添付（無料プランの5MB制限に収まる）"; const segs = await getSegments(id);
   const d = new Date(cur.createdAt);
   $("dTitle").textContent = cur.result?.title || cur.title || "無題の録音";
   showMeta(segs.length);
@@ -977,7 +1054,7 @@ $("saveBtn").onclick = async () => {
   try {
     cur.result = readResult(); cur.date = $("rDate").value; cur.transcript = $("dTranscript").value.trim();
     const d = await api({ action:"save", mode:modeOf(cur), result:cur.result, transcript:cur.transcript, date:cur.date, duration:cur.duration?fmt(cur.duration):"" });
-    cur.notionUrl = d.url; cur.status="保存済み"; await putMeeting(cur);
+    cur.notionUrl = d.url; cur.notionPageId = d.id; cur.status="保存済み"; await putMeeting(cur);
     $("notionLink").innerHTML = `<a href="${d.url}" target="_blank">Notionで開く</a>`; toast("Notionに保存しました");
   } catch (e) { toast("保存できませんでした："+e.message, 4000); }
   paintDetailMode(); busy(false);
