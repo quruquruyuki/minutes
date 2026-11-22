@@ -94,13 +94,14 @@ Deno.serve(async (req) => {
     const ct = req.headers.get("content-type") ?? "";
     if (ct.includes("multipart/form-data")) {
       const form = await req.formData();
-      if (form.get("action") === "attach") return json(await attachAudio(form));
+      if (form.get("action") === "upload") return json(await uploadAudio(form));
       if (form.get("action") !== "transcribe") return json({ error: "不明な処理" }, 400);
       return json(await transcribe(form));
     }
     const body = await req.json();
     if (body.action === "summarize") return json(await summarize(body));
     if (body.action === "save") return json(await saveToNotion(body));
+    if (body.action === "setAudio") return json(await setAudio(body));
     return json({ error: "不明な処理" }, 400);
   } catch (e) {
     return json({ error: String((e as Error).message ?? e) }, 500);
@@ -329,8 +330,12 @@ async function notion(path: string, method: string, body: unknown) {
   return d;
 }
 
-// ページを作り、100ブロックを超える分は後から足す
-async function createPage(dataSourceId: string, properties: any, blocks: any[]) {
+// ページを作り、100ブロックを超える分は後から足す。pageId があれば同じページを上書きする
+async function createPage(dataSourceId: string, properties: any, blocks: any[], pageId = "") {
+  if (pageId) {
+    try { return await overwritePage(pageId, properties, blocks); }
+    catch (e) { if (!/Could not find|archived|in trash/i.test(String((e as Error).message))) throw e; } // ページが消されていたら新しく作る
+  }
   const page = await notion("pages", "POST", {
     parent: { type: "data_source_id", data_source_id: dataSourceId },
     properties,
@@ -342,12 +347,29 @@ async function createPage(dataSourceId: string, properties: any, blocks: any[]) 
   return { url: page.url, id: page.id };
 }
 
-// 保存済みのNotionページに音声ファイルを添付する（Notionの無料プランは1ファイル5MBまで）
-async function attachAudio(form: FormData) {
+// 2回目以降の保存：プロパティ（音声以外）と本文を最新の内容に置き換える。本文に置いた音声（以前の方式）は残す
+async function overwritePage(pageId: string, properties: any, blocks: any[]) {
+  const page = await notion(`pages/${pageId}`, "PATCH", { properties });
+  const old: any[] = [];
+  let cursor = "";
+  do {
+    const r = await notion(`blocks/${pageId}/children?page_size=100${cursor ? `&start_cursor=${cursor}` : ""}`, "GET", undefined);
+    old.push(...r.results);
+    cursor = r.has_more ? r.next_cursor : "";
+  } while (cursor);
+  const keep = (b: any) => b.type === "audio" || (b.type === "heading_2" && (b.heading_2?.rich_text ?? []).map((t: any) => t.plain_text).join("") === "音声");
+  for (const b of old) if (!keep(b)) await notion(`blocks/${b.id}`, "DELETE", undefined);
+  for (let i = 0; i < blocks.length; i += 100) {
+    await notion(`blocks/${pageId}/children`, "PATCH", { children: blocks.slice(i, i + 100) });
+  }
+  return { url: page.url, id: page.id };
+}
+
+// 音声ファイルをNotionに送る（1ファイル5MBまで）。送ったファイルのIDを返し、あとで「音声」プロパティに付ける
+async function uploadAudio(form: FormData) {
   const file = form.get("file") as File;
-  const pageId = String(form.get("page") ?? "").replace(/-/g, "");
-  if (!file || !/^[0-9a-f]{32}$/i.test(pageId)) throw new Error("添付先のページか音声がありません");
-  if (file.size > 5 * 1024 * 1024) throw new Error("5MBを超える音声はNotionに添付できません");
+  if (!file) throw new Error("音声がありません");
+  if (file.size > 5 * 1024 * 1024) throw new Error("5MBを超える音声はNotionに保存できません");
   const ext = (file.name.split(".").pop() || "").toLowerCase();
   const type = ext === "mp3" ? "audio/mpeg" : ext === "m4a" || ext === "mp4" ? "audio/mp4" : ext === "webm" ? "audio/webm" : (file.type || "audio/mp4");
   const up = await notion("file_uploads", "POST", { mode: "single_part", filename: file.name, content_type: type });
@@ -360,10 +382,15 @@ async function attachAudio(form: FormData) {
   });
   const d = await r.json();
   if (!r.ok) throw new Error(`Notion: ${d.message ?? r.status}`);
-  const blocks: any[] = [];
-  if (form.get("heading") === "1") blocks.push(h2("音声"));
-  blocks.push({ object: "block", type: "audio", audio: { type: "file_upload", file_upload: { id: up.id } } });
-  await notion(`blocks/${pageId}/children`, "PATCH", { children: blocks });
+  return { id: up.id, name: file.name };
+}
+
+// 送った音声をページの「音声」プロパティにまとめて付ける（前に付けた分は置き換わる）
+async function setAudio(body: any) {
+  const pageId = String(body.page ?? "").replace(/-/g, "");
+  if (!/^[0-9a-f]{32}$/i.test(pageId)) throw new Error("保存先のページがありません");
+  const files = (body.files ?? []).map((f: any) => ({ type: "file_upload", file_upload: { id: f.id }, name: String(f.name).slice(0, 100) }));
+  await notion(`pages/${pageId}`, "PATCH", { properties: { "音声": { files } } });
   return { ok: true };
 }
 const todoBlocks = (todos: any[]) => todos.map((t) => {
@@ -393,7 +420,7 @@ async function saveSeminar(body: any) {
     "日付": { date: { start: date || new Date().toISOString().slice(0, 10) } },
     "演者": { rich_text: rt((x.speaker || "").slice(0, 1900)) },
     "キーワード": { multi_select: kw.map((name) => ({ name })) },
-  }, blocks);
+  }, blocks, String(body.pageId ?? "").replace(/-/g, ""));
 }
 
 // 商談：議事録と同じデータベースに、商談向けの項目で保存する
@@ -416,7 +443,7 @@ async function saveDeal(body: any) {
   return createPage(MINUTES_DS(), {
     "名前": { title: rt(x.title || "商談") },
     "日付": { date: { start: date || new Date().toISOString().slice(0, 10) } },
-  }, blocks);
+  }, blocks, String(body.pageId ?? "").replace(/-/g, ""));
 }
 
 // MR面談：議事録と同じデータベースに、面談向けの項目で保存する
@@ -437,7 +464,7 @@ async function saveVisit(body: any) {
   return createPage(MINUTES_DS(), {
     "名前": { title: rt(x.title || "面談") },
     "日付": { date: { start: date || new Date().toISOString().slice(0, 10) } },
-  }, blocks);
+  }, blocks, String(body.pageId ?? "").replace(/-/g, ""));
 }
 
 async function saveToNotion(body: any) {
@@ -457,5 +484,5 @@ async function saveToNotion(body: any) {
   return createPage(MINUTES_DS(), {
     "名前": { title: rt(x.title || "議事録") },
     "日付": { date: { start: date || new Date().toISOString().slice(0, 10) } },
-  }, blocks);
+  }, blocks, String(body.pageId ?? "").replace(/-/g, ""));
 }
