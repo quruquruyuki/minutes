@@ -57,10 +57,12 @@
   .mbar i { position:absolute; top:0; bottom:0; width:2px; background:rgba(55,53,47,.25); }
   .mtext { font-size:13px; margin-top:6px; font-weight:600; }
   .seg2 { display:inline-flex; background:var(--soft); border-radius:9px; padding:3px; margin-bottom:18px; }
-  .seg2 button { border:none; border-radius:7px; padding:7px 18px; color:var(--sub); }
+  .seg2 button { border:none; border-radius:7px; padding:7px 14px; color:var(--sub); }
   .seg2 button.on { background:#fff; color:var(--fg); box-shadow:0 1px 2px rgba(0,0,0,.12); font-weight:600; }
   .tag.sem { background:#e7f0fb; color:#1f5aa6; }
   .tag.deal { background:#fbf3db; color:#7a5a12; }
+  .tag.visit { background:#e8f3ec; color:#2b593f; }
+  .aeBox { background:#ffe2dd; color:#5d1715; border-radius:10px; padding:10px 12px; margin-top:12px; }
   dialog { border:none; border-radius:14px; padding:0; width:min(92vw,520px); max-height:85vh; }
   dialog::backdrop { background:rgba(0,0,0,.3); }
   .dlg { padding:16px 18px 20px; overflow:auto; max-height:85vh; }
@@ -90,7 +92,7 @@
   <header><h1>議事録</h1><button class="icon" id="openSettings" aria-label="設定">⚙︎</button></header>
   <main>
     <div class="rec">
-      <div class="seg2" id="modeSeg"><button data-m="meeting">会議</button><button data-m="seminar">セミナー</button><button data-m="deal">商談</button></div><br>
+      <div class="seg2" id="modeSeg"><button data-m="meeting">会議</button><button data-m="seminar">セミナー</button><button data-m="deal">商談</button><button data-m="visit">面談</button></div><br>
       <button class="recbtn" id="recBtn" aria-label="録音"><span></span></button>
       <div class="timer" id="timer">00:00</div>
       <div id="recAlert" class="hidden" style="margin:8px auto;max-width:420px;background:#ffe2dd;color:#5d1715;border-radius:10px;padding:10px 12px;font-size:14px;line-height:1.5">
@@ -120,7 +122,7 @@
     <div class="card">
       <div id="dMeta" class="hint"></div>
       <label>種類</label>
-      <select id="dMode"><option value="meeting">会議（議事録）</option><option value="seminar">セミナー（セミナーノート）</option><option value="deal">商談（提案・見積もりの説明を受ける）</option></select>
+      <select id="dMode"><option value="meeting">会議（議事録）</option><option value="seminar">セミナー（セミナーノート）</option><option value="deal">商談（提案・見積もりの説明を受ける）</option><option value="visit">面談（MRの医師面談・Veeva用）</option></select>
       <label>まとめの精度</label>
       <select id="dQuality"><option value="standard">標準</option><option value="hq">高精度（料金は約2倍）</option></select>
       <label id="dMemoLabel">補足メモ</label>
@@ -152,6 +154,19 @@
       <label>気になる点（1行に1つ）</label><textarea id="kCons"></textarea>
       <label>質疑応答（「Q. 質問」の次の行に「A. 回答」）</label><textarea id="kQa"></textarea>
       <label>確認・検討すること（1行に1つ。「やること / 担当 / 期限」）</label><textarea id="kTodos"></textarea>
+      </div>
+      <div id="visitFields">
+      <div class="aeBox hidden" id="vAeBox"><b>⚠ 副作用・有害事象の可能性がある発言があります</b><div class="hint" style="color:#5d1715">会社の手順に沿って報告が必要か確認してください</div></div>
+      <label>副作用・有害事象の可能性（1行に1つ）</label><textarea id="vAe"></textarea>
+      <label>相手（施設・診療科・先生）</label><input id="vDoctor">
+      <label>要約</label><textarea id="vSummary"></textarea>
+      <label>話した内容（「## 話題」の下に「- 内容」）</label><textarea id="vTopics" style="min-height:140px"></textarea>
+      <label>先生の反応・関心（1行に1つ）</label><textarea id="vReaction"></textarea>
+      <label>処方・使用の状況（1行に1つ）</label><textarea id="vUsage"></textarea>
+      <label>依頼・宿題（1行に1つ）</label><textarea id="vRequests"></textarea>
+      <label>次回の提案・アクション（1行に1つ）</label><textarea id="vNext"></textarea>
+      <label>Veeva用の記録文</label><textarea id="vVeeva" style="min-height:140px"></textarea>
+      <div class="row" style="justify-content:flex-start"><button id="vCopy">Veeva用の記録文をコピー</button></div>
       </div>
       <div id="semFields">
       <label>演者（名前・所属）</label><input id="zSpeaker">
@@ -343,10 +358,10 @@ function applyDict(text) {
   for (const d of [...(S.dict||[])].sort((a,b)=>b.from.length-a.from.length)) t = t.split(d.from).join(d.to);
   return t;
 }
-const hintFor = mode => [mode==="seminar" ? S.hintSem : S.hint, ...(S.dict||[]).map(d=>d.to)].filter(Boolean).join("、");
+const hintFor = mode => [mode==="seminar" ? S.hintSem : mode==="visit" ? [S.hint, S.hintSem].filter(Boolean).join("、") : S.hint, ...(S.dict||[]).map(d=>d.to)].filter(Boolean).join("、");
 
 // ===== 会議／セミナー =====
-const MODE_NAME = { meeting:"会議", seminar:"セミナー", deal:"商談" };
+const MODE_NAME = { meeting:"会議", seminar:"セミナー", deal:"商談", visit:"面談" };
 function paintMode() { document.querySelectorAll("#modeSeg button").forEach(b => b.classList.toggle("on", b.dataset.m===S.mode)); }
 document.querySelectorAll("#modeSeg button").forEach(b => b.onclick = () => {
   S.mode = b.dataset.m; localStorage.setItem("minutes-settings", JSON.stringify(S)); paintMode();
@@ -661,7 +676,7 @@ async function renderList() {
     const d = new Date(m.createdAt);
     const el = document.createElement("div"); el.className="item";
     const cls = m.status==="保存済み"?"ok":m.status==="エラー"?"ng":"";
-    el.innerHTML = `<div class="t"><b></b><small>${d.toLocaleDateString("ja-JP")} ${d.toLocaleTimeString("ja-JP",{hour:"2-digit",minute:"2-digit"})}${m.duration?"・"+fmt(m.duration):""}${m.cost?"・"+costLabel(m):""}</small></div>${modeOf(m)==="seminar"?'<span class="tag sem">セミナー</span>':modeOf(m)==="deal"?'<span class="tag deal">商談</span>':""}<span class="tag ${cls}">${m.status}</span>`;
+    el.innerHTML = `<div class="t"><b></b><small>${d.toLocaleDateString("ja-JP")} ${d.toLocaleTimeString("ja-JP",{hour:"2-digit",minute:"2-digit"})}${m.duration?"・"+fmt(m.duration):""}${m.cost?"・"+costLabel(m):""}</small></div>${modeOf(m)==="seminar"?'<span class="tag sem">セミナー</span>':modeOf(m)==="deal"?'<span class="tag deal">商談</span>':modeOf(m)==="visit"?'<span class="tag visit">面談</span>':""}<span class="tag ${cls}">${m.status}</span>`;
     el.querySelector("b").textContent = m.result?.title || m.title || "無題の録音";
     el.onclick = () => openDetail(m.id);
     $("list").appendChild(el);
@@ -720,12 +735,14 @@ function showMeta(n) {
 }
 
 function paintDetailMode() {
-  const md = modeOf(cur), sem = md==="seminar", deal = md==="deal";
+  const md = modeOf(cur), sem = md==="seminar", deal = md==="deal", visit = md==="visit";
   $("dMemoLabel").textContent = sem ? "補足メモ（演題・演者・主催など。まとめの精度が上がります）"
-    : deal ? "補足メモ（相手の会社・担当者、何の説明か、比べている相手など）" : "補足メモ（会議名・参加者など。要約の精度が上がります）";
+    : deal ? "補足メモ（相手の会社・担当者、何の説明か、比べている相手など）"
+    : visit ? "補足メモ（施設名・診療科・先生名、面談の目的など）" : "補足メモ（会議名・参加者など。要約の精度が上がります）";
   $("dMemo").placeholder = sem ? "例：〇〇学会 ランチョンセミナー／△△大学 □□先生"
-    : deal ? "例：〇〇ホーム 再見積もりの説明／担当 奥田さん" : "例：〇〇病院 勉強会打ち合わせ／山田先生・佐藤さん";
-  $("meetFields").classList.toggle("hidden", sem || deal); $("semFields").classList.toggle("hidden", !sem); $("dealFields").classList.toggle("hidden", !deal);
+    : deal ? "例：〇〇ホーム 再見積もりの説明／担当 奥田さん"
+    : visit ? "例：〇〇病院 泌尿器科 山田先生／新規処方のお願い" : "例：〇〇病院 勉強会打ち合わせ／山田先生・佐藤さん";
+  $("meetFields").classList.toggle("hidden", sem || deal || visit); $("semFields").classList.toggle("hidden", !sem); $("dealFields").classList.toggle("hidden", !deal); $("visitFields").classList.toggle("hidden", !visit);
   $("saveBtn").textContent = sem ? "Notionのセミナーノートに保存" : "Notionに保存";
 }
 $("dQuality").onchange = async () => { cur.quality = $("dQuality").value; await putMeeting(cur); };
@@ -743,6 +760,14 @@ function fillResult(r) {
     $("zData").value = (r.data||[]).join("\n");
     $("zQa").value = (r.qa||[]).map(x=>`Q. ${x.q}\nA. ${x.a}`).join("\n");
     $("zTips").value = (r.tips||[]).join("\n");
+    return;
+  }
+  if (modeOf(cur)==="visit") {
+    $("vDoctor").value = r.doctor||""; $("vSummary").value = r.summary||"";
+    $("vTopics").value = (r.topics||[]).map(t=>`## ${t.heading}\n`+(t.points||[]).map(p=>`- ${p}`).join("\n")).join("\n\n");
+    for (const [id,k] of [["vReaction","reaction"],["vUsage","usage"],["vRequests","requests"],["vNext","next"],["vAe","ae"]]) $(id).value = (r[k]||[]).join("\n");
+    $("vVeeva").value = r.veeva||"";
+    $("vAeBox").classList.toggle("hidden", !(r.ae||[]).length);
     return;
   }
   if (modeOf(cur)==="deal") {
@@ -780,6 +805,11 @@ function readQa(lines) {
 const readTodos = lines => lines.map(l=>{ const [task,owner="",due=""]=l.split("/").map(s=>s.trim()); return {task,owner,due}; });
 function readResult() {
   const lines = id => $(id).value.split("\n").map(s=>s.trim()).filter(Boolean);
+  if (modeOf(cur)==="visit") {
+    return { title:$("rTitle").value.trim(), genre:"面談", doctor:$("vDoctor").value.trim(), summary:$("vSummary").value.trim(),
+      topics:parseTopics($("vTopics").value), reaction:lines("vReaction"), usage:lines("vUsage"), requests:lines("vRequests"),
+      next:lines("vNext"), ae:lines("vAe"), veeva:$("vVeeva").value.trim() };
+  }
   if (modeOf(cur)==="deal") {
     return { title:$("rTitle").value.trim(), genre:"商談", counterpart:$("kWho").value.trim(), summary:$("kSummary").value.trim(),
       proposal:parseTopics($("kProposal").value), money:lines("kMoney"), pros:lines("kPros"), cons:lines("kCons"),
@@ -911,6 +941,11 @@ $("delBtn").onclick = async () => {
   await deleteMeeting(cur.id); show("home"); renderList();
 };
 $("dTranscript").onchange = async () => { cur.transcript=$("dTranscript").value; await putMeeting(cur); };
+$("vCopy").onclick = async () => {
+  const t = $("vVeeva").value.trim(); if (!t) return toast("記録文がありません");
+  try { await navigator.clipboard.writeText(t); toast("コピーしました。Veevaに貼り付けてください"); }
+  catch { $("vVeeva").select(); toast("コピーできなかったので、文章を選択しました。長押しでコピーしてください", 4000); }
+};
 $("dictApply").onclick = async () => {
   if (!(S.dict||[]).length) return toast("⚙︎の「ユーザー辞書」に言葉を登録してください", 3500);
   const before = $("dTranscript").value, after = applyDict(before);

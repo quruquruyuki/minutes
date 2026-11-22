@@ -227,10 +227,28 @@ const DEAL_PROMPT = `以下は商談・提案・見積もり説明など、相�
   "todos": [{"task": "自分が確認・検討すること、相手からの宿題", "owner": "担当（自分・相手など。不明なら空）", "due": "期限（不明なら空）"}]
 }`;
 
+const VISIT_PROMPT = `以下は製薬会社のMRが医師と面談したときの文字起こしです。MRがあとで見返し、Veeva（CRM）のコール記録や次回の訪問準備に使えるノートを日本語で作ってください。
+文字起こしには聞き間違いが含まれることがあります。薬剤名・疾患名は文脈から正しい表記に直してください。話されていないことは推測で足さないでください。
+患者の氏名など、個人が特定できる情報は書かないでください（「70代男性」のような書き方にとどめる）。
+副作用・有害事象の可能性がある発言（薬を使った患者に起きた好ましくない症状や検査値の変化など）は、小さなことでも必ず ae に抜き出してください。
+次のJSONだけを出力してください（前後に説明文やコードブロックを付けない）:
+{
+  "title": "施設・先生と話題が分かる短いタイトル",
+  "doctor": "施設名・診療科・先生名（分かる範囲。不明なら空）",
+  "summary": "2〜4文の要約",
+  "topics": [{"heading": "話題", "points": ["内容"]}],
+  "reaction": ["先生の反応・関心・印象に残った発言"],
+  "usage": ["処方の状況・使用経験・対象としている患者像"],
+  "requests": ["先生からの依頼・質問・宿題"],
+  "next": ["次回の提案・アクション"],
+  "ae": ["副作用・有害事象の可能性がある発言（なければ空の配列）"],
+  "veeva": "Veevaのコール記録にそのまま貼れる簡潔な記録文（200〜400字、体言止め・箇条書き可）"
+}`;
+
 async function summarize(body: any) {
   const { transcript, engine = "claude", model = "", memo = "", mode = "meeting", quality = "standard" } = body;
   if (!transcript) throw new Error("文字起こしが空です");
-  const prompt = mode === "seminar" ? SEMINAR_PROMPT : mode === "deal" ? DEAL_PROMPT : SUMMARY_PROMPT;
+  const prompt = mode === "seminar" ? SEMINAR_PROMPT : mode === "deal" ? DEAL_PROMPT : mode === "visit" ? VISIT_PROMPT : SUMMARY_PROMPT;
   const user = `${prompt}${memo ? `\n\n補足メモ: ${memo}` : ""}\n\n--- 文字起こし ---\n${transcript}`;
   let raw = "";
   let usd: number | null = null;
@@ -375,8 +393,30 @@ async function saveDeal(body: any) {
   }, blocks);
 }
 
+// MR面談：議事録と同じデータベースに、面談向けの項目で保存する
+async function saveVisit(body: any) {
+  const { result: x, transcript = "", date, duration = "" } = body;
+  const blocks: any[] = [];
+  const meta = ["ジャンル: 面談", x.doctor && `相手: ${x.doctor}`, duration && `録音時間: ${duration}`].filter(Boolean).join("　");
+  blocks.push(para(meta));
+  if (x.ae?.length) blocks.push(h2("⚠ 副作用・有害事象の可能性"), ...x.ae.map(li));
+  blocks.push(h2("要約"), ...chunk(x.summary || "-").map(para));
+  if (x.topics?.length) blocks.push(h2("話した内容"), ...topicBlocks(x.topics, "話題"));
+  if (x.reaction?.length) blocks.push(h2("先生の反応・関心"), ...x.reaction.map(li));
+  if (x.usage?.length) blocks.push(h2("処方・使用の状況"), ...x.usage.map(li));
+  if (x.requests?.length) blocks.push(h2("依頼・宿題"), ...x.requests.map((t: string) => todo(t)));
+  if (x.next?.length) blocks.push(h2("次回の提案・アクション"), ...x.next.map(li));
+  if (x.veeva) blocks.push(h2("Veeva用の記録文"), ...chunk(x.veeva).map(para));
+  if (transcript) blocks.push(h2("文字起こし全文"), ...chunk(transcript).map(para));
+  return createPage(MINUTES_DS(), {
+    "名前": { title: rt(x.title || "面談") },
+    "日付": { date: { start: date || new Date().toISOString().slice(0, 10) } },
+  }, blocks);
+}
+
 async function saveToNotion(body: any) {
   if (body.mode === "seminar") return saveSeminar(body);
+  if (body.mode === "visit") return saveVisit(body);
   if (body.mode === "deal") return saveDeal(body);
   const { result: x, transcript = "", date, duration = "" } = body;
   const blocks: any[] = [];
