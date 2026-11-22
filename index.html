@@ -618,8 +618,10 @@ async function openDetail(id) {
   segs.forEach((s,i) => {
     const w = document.createElement("div"); w.className="seg";
     const url = URL.createObjectURL(s.blob);
-    const ext = (s.mime||"").includes("webm")?"webm":"m4a";
-    w.innerHTML = `<div style="display:flex;justify-content:space-between"><span>${i+1}／${segs.length}（${(s.blob.size/1024/1024).toFixed(1)}MB）${s.text?"・文字起こし済み":""}</span><a download="${cur.id}_${i+1}.${ext}" href="${url}">保存</a></div><audio controls preload="none" src="${url}"></audio>`;
+    const ext = (s.mime||"").includes("webm") ? "webm" : (s.mime||"").includes("mp3") || (s.mime||"").includes("mpeg") ? "mp3" : (s.name?.split(".").pop() || "m4a");
+    // 保存するファイル名：日付_タイトル_番号（ファイル名に使えない記号は除く）
+    const base = `${(cur.date || cur.createdAt.slice(0,10))}_${(cur.result?.title || cur.title || "録音").replace(/[\\/:*?"<>|\s]+/g, "_").slice(0, 40)}`;
+    w.innerHTML = `<div style="display:flex;justify-content:space-between"><span>${i+1}／${segs.length}（${(s.blob.size/1024/1024).toFixed(1)}MB）${s.text?"・文字起こし済み":""}</span><a download="${base}_${i+1}.${ext}" href="${url}">保存</a></div><audio controls preload="none" src="${url}"></audio>`;
     $("dAudio").appendChild(w);
   });
   fillResult(cur.result);
